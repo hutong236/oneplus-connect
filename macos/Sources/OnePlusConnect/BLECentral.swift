@@ -28,6 +28,7 @@ final class BleCentral: NSObject {
 
     var onPhaseChange: ((Phase) -> Void)?
     var onStatus: ((BleProtocol.Status) -> Void)?
+    var onUnexpectedDisconnect: (() -> Void)?
 
     private let queue = DispatchQueue(label: "com.hutong.oneplusconnect.ble")
     private var manager: CBCentralManager?
@@ -52,6 +53,7 @@ final class BleCentral: NSObject {
     }
 
     private var pendingCommand: PendingCommand?
+    private var suppressDisconnectCallback = false
 
     private(set) var phase: Phase = .idle {
         didSet {
@@ -121,6 +123,9 @@ final class BleCentral: NSObject {
     /// 发送指令并等待符合预期的 STATUS 通知（expected 为 nil 表示任意状态即可）
     func send(_ cmd: UInt8, expectingHotspotOn expected: Bool?,
               timeout: TimeInterval) async throws -> BleProtocol.Status {
+        guard AppConfig.sharedSecret.utf8.count >= 32 else {
+            throw BleError.connectFailed("未配置 BLE 配对密钥，请按配对说明设置 Keychain")
+        }
         guard let peripheral = peripheral, let characteristic = cmdCharacteristic else {
             throw BleError.connectFailed("BLE 未就绪")
         }
@@ -149,8 +154,11 @@ final class BleCentral: NSObject {
 
     func disconnect() {
         queue.async {
+            self.suppressDisconnectCallback = true
             if let p = self.peripheral {
                 self.manager?.cancelPeripheralConnection(p)
+            } else {
+                self.suppressDisconnectCallback = false
             }
             self.peripheral = nil
             self.cmdCharacteristic = nil
@@ -210,6 +218,8 @@ extension BleCentral: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func centralManager(_ central: CBCentralManager, didDisconnectPeripheral peripheral: CBPeripheral,
                         error: Error?) {
+        let wasUnexpected = !suppressDisconnectCallback
+        suppressDisconnectCallback = false
         phase = .disconnected
         cmdCharacteristic = nil
         statusCharacteristic = nil
@@ -218,6 +228,9 @@ extension BleCentral: CBCentralManagerDelegate, CBPeripheralDelegate {
             cont.resume(throwing: BleError.connectFailed("连接中断"))
         }
         failPendingCommand(BleError.connectFailed("连接中断"))
+        if wasUnexpected {
+            DispatchQueue.main.async { [onUnexpectedDisconnect] in onUnexpectedDisconnect?() }
+        }
     }
 
     func peripheral(_ peripheral: CBPeripheral, didDiscoverServices error: Error?) {

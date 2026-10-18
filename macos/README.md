@@ -14,7 +14,7 @@ swift build && swift run
 
 编辑 `Sources/OnePlusConnect/Config.swift`：
 
-- `sharedSecret`：须与 Android 端 `AgentConfig.SHARED_SECRET` 一致
+- BLE 配对密钥：从 macOS Keychain 读取；需与 Android 应用安全保存的密钥一致，见 `docs/real-device-acceptance.md`
 - `hotspotSSID`：手机热点 SSID（默认 mmmmmm）
 - `wifiPassword`：留空则使用钥匙串中已保存的密码
 

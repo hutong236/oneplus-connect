@@ -2,10 +2,10 @@ import CryptoKit
 import CoreBluetooth
 import Foundation
 
-/// BLE 协议 v1，契约见 docs/ble-protocol.md。
+/// BLE 协议 v2，契约见 docs/ble-protocol.md。
 /// 修改本文件必须同步 Android 端 BleProtocol.kt。
 enum BleProtocol {
-    static let version: UInt8 = 1
+    static let version: UInt8 = 2
 
     static let serviceUUID = CBUUID(string: "7b6e0001-2a4c-4e6d-9b8a-5f1e3d5c7a9b")
     static let cmdUUID = CBUUID(string: "7b6e0002-2a4c-4e6d-9b8a-5f1e3d5c7a9b")
@@ -30,21 +30,25 @@ enum BleProtocol {
         var ssid: String?
     }
 
-    /// CMD 帧（14 字节）：ver(1) cmd(1) nonce(4 LE) auth(8)
-    /// auth = SHA256(secret ‖ nonce_le ‖ cmd)[0..7]
-    static func encodeCommand(_ cmd: UInt8, secret: String) -> Data {
-        let nonce = UInt32.random(in: 1...UInt32.max)
-        var input = Data(secret.utf8)
+    /// CMD 帧（26 字节）：ver(1) cmd(1) nonce(8 LE) HMAC(16)
+    static func encodeCommand(_ cmd: UInt8, secret: String, nonce: UInt64 = makeNonce()) -> Data {
+        var input = Data()
         withUnsafeBytes(of: nonce.littleEndian) { input.append(contentsOf: $0) }
         input.append(cmd)
-        let digest = SHA256.hash(data: input)
+        let key = SymmetricKey(data: Data(secret.utf8))
+        let digest = HMAC<SHA256>.authenticationCode(for: input, using: key)
 
         var frame = Data()
         frame.append(version)
         frame.append(cmd)
         withUnsafeBytes(of: nonce.littleEndian) { frame.append(contentsOf: $0) }
-        frame.append(contentsOf: digest.prefix(8))
+        frame.append(contentsOf: digest.prefix(16))
         return frame
+    }
+
+    private static func makeNonce() -> UInt64 {
+        let milliseconds = UInt64(Date().timeIntervalSince1970 * 1_000)
+        return (milliseconds << 16) | UInt64.random(in: 0...UInt64(UInt16.max))
     }
 
     /// STATUS 帧：ver(1) flags(1) battery(1) ssidLen(1) ssid(N)

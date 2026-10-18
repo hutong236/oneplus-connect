@@ -11,7 +11,7 @@ final class AppState: ObservableObject {
         case hotspotStarting
         case joiningWifi
         case verifying
-        case connected(gateway: String)
+        case connected(gateway: String, internetReachable: Bool)
         case failed(String)
 
         var isRunning: Bool {
@@ -28,7 +28,8 @@ final class AppState: ObservableObject {
             case .hotspotStarting: return "BLE 已连接，正在开启手机热点 …"
             case .joiningWifi: return "热点已开启，正在加入 Wi-Fi …"
             case .verifying: return "验证网络连通性 …"
-            case .connected(let gateway): return "已连接（网关 \(gateway)）"
+            case .connected(let gateway, let internet):
+                return internet ? "热点已连接（网关 \(gateway)，互联网可达）" : "热点已连接（网关 \(gateway)，互联网不可直连）"
             case .failed(let reason): return "失败：\(reason)"
             }
         }
@@ -41,6 +42,9 @@ final class AppState: ObservableObject {
 
     private let ble = BleCentral()
     private var logTimeFormatter = DateFormatter()
+    private var previousSSID: String?
+    private var reconnectTask: Task<Void, Never>?
+    private var reconnectAttempts = 0
 
     init() {
         logTimeFormatter.dateFormat = "HH:mm:ss"
@@ -54,24 +58,46 @@ final class AppState: ObservableObject {
                 }
             }
         }
+        ble.onUnexpectedDisconnect = { [weak self] in
+            Task { @MainActor in self?.scheduleReconnect() }
+        }
+        UserDefaults.standard.register(defaults: ["autoConnect": true, "autoReconnect": true])
+        Task { [weak self] in
+            guard UserDefaults.standard.bool(forKey: "autoConnect") else { return }
+            self?.connect()
+        }
     }
 
     func connect() {
         guard !phase.isRunning else { return }
+        reconnectTask?.cancel()
+        reconnectTask = nil
         Task { await runConnectChain() }
     }
 
     func disconnect() {
         guard !phase.isRunning else { return }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        reconnectAttempts = 0
         Task { await runDisconnectChain() }
     }
 
     private func runConnectChain() async {
         do {
+            guard AppConfig.sharedSecret.utf8.count >= 32 else {
+                phase = .failed("未配置 BLE 配对密钥，请按配对说明设置 Keychain")
+                note("缺少 BLE 配对密钥，未启动自动连接")
+                return
+            }
             phase = .bleSearching
             note("搜索 OnePlus Agent 广播 …")
             try await ble.ensurePoweredOn()
             try await ble.connect(timeout: AppConfig.scanTimeout)
+            if previousSSID == nil {
+                let currentSSID = await HotspotJoiner.currentSSID()
+                if currentSSID != AppConfig.hotspotSSID { previousSSID = currentSSID }
+            }
             note("BLE 已连接，发送 CONNECT 指令")
 
             phase = .hotspotStarting
@@ -92,13 +118,16 @@ final class AppState: ObservableObject {
             }
 
             phase = .verifying
-            let gateway = try await ConnectivityCheck.waitUntilOnline(ssid: ssid,
-                                                                      timeout: AppConfig.joinTimeout)
-            phase = .connected(gateway: gateway)
-            note("连接完成，网关 \(gateway)")
+            let verification = try await ConnectivityCheck.waitUntilOnline(ssid: ssid,
+                                                                            timeout: AppConfig.joinTimeout)
+            phase = .connected(gateway: verification.gateway,
+                               internetReachable: verification.internetReachable)
+            reconnectAttempts = 0
+            note("热点链路已验证：\(verification.wifiInterface)，网关 \(verification.gateway)，直连互联网 \(verification.internetReachable ? "可达" : "不可达（Clash TUN/运营商网络请分别验收）")")
         } catch {
             phase = .failed(error.localizedDescription)
             note("失败：\(error.localizedDescription)")
+            scheduleReconnect()
         }
     }
 
@@ -112,7 +141,13 @@ final class AppState: ObservableObject {
                                    timeout: AppConfig.hotspotTimeout)
             ble.disconnect()
             phase = .idle
-            note("已断开（手机热点已关闭）")
+            if let ssid = previousSSID {
+                try await HotspotJoiner.join(ssid: ssid, password: "")
+                previousSSID = nil
+                note("手机热点已关闭，正在恢复之前的 Wi-Fi：\(ssid)")
+            } else {
+                note("手机热点已关闭；没有检测到此前的 Wi-Fi 网络")
+            }
         } catch {
             phase = .failed(error.localizedDescription)
             note("断开失败：\(error.localizedDescription)")
@@ -123,5 +158,22 @@ final class AppState: ObservableObject {
         log.append("\(logTimeFormatter.string(from: Date()))  \(message)")
         if log.count > 200 { log.removeFirst(log.count - 200) }
         print(message)
+    }
+
+    private func scheduleReconnect() {
+        guard UserDefaults.standard.bool(forKey: "autoReconnect"),
+              reconnectTask == nil,
+              !phase.isRunning,
+              reconnectAttempts < 5 else { return }
+        let delays: [UInt64] = [3, 8, 15, 30, 60]
+        let delay = delays[reconnectAttempts]
+        reconnectAttempts += 1
+        note("连接中断，\(delay) 秒后自动重连（\(reconnectAttempts)/5）")
+        reconnectTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
+            guard !Task.isCancelled, let self else { return }
+            self.reconnectTask = nil
+            self.connect()
+        }
     }
 }

@@ -1,0 +1,28 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run macOS tests
+        run: cd macos && swift test
+      - name: Build macOS app
+        run: cd macos && swift build -c release
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Run Android unit tests
+        run: cd android && ./gradlew testDebugUnitTest
+      - name: Build Android debug APK
+        run: cd android && ./gradlew assembleDebug

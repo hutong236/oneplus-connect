@@ -167,8 +167,14 @@ enum HotspotJoiner {
 /// 链路层连通性：默认网关（即手机 wlan0）可达即视为已接入热点
 enum ConnectivityCheck {
 
-    static func defaultGateway() async -> String? {
-        guard let output = try? await Shell.run("/sbin/route", ["-n", "get", "default"]) else { return nil }
+    struct Verification {
+        let wifiInterface: String
+        let gateway: String
+        let internetReachable: Bool
+    }
+
+    static func defaultGateway(interface: String) async -> String? {
+        guard let output = try? await Shell.run("/sbin/route", ["-n", "get", "-ifscope", interface, "default"]) else { return nil }
         // 输出包含 "   gateway: 192.168.105.34"
         for line in output.components(separatedBy: .newlines) {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
@@ -181,35 +187,42 @@ enum ConnectivityCheck {
         return nil
     }
 
-    static func ping(_ host: String) -> Bool {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/sbin/ping")
-        task.arguments = ["-c", "1", "-t", "2", host]
-        task.standardOutput = Pipe()
-        task.standardError = Pipe()
-        do {
-            try task.run()
-            task.waitUntilExit()
-            return task.terminationStatus == 0
-        } catch {
-            return false
-        }
+    static func ping(_ host: String, interface: String) async -> Bool {
+        (try? await Shell.run("/sbin/ping", ["-b", interface, "-c", "1", "-W", "2000", host], timeout: 4)) != nil
     }
 
-    /// 轮询直到 SSID 匹配且网关可 ping；SSID 读取失败时退化为仅凭网关可达判定
-    static func waitUntilOnline(ssid: String, timeout: TimeInterval) async throws -> String {
+    static func internetReachable(interface: String) async -> Bool {
+        guard let status = try? await Shell.run(
+            "/usr/bin/curl",
+            ["--interface", interface, "--noproxy", "*", "--connect-timeout", "3", "--max-time", "5",
+             "-sS", "-o", "/dev/null", "-w", "%{http_code}",
+             "https://www.apple.com/library/test/success.html"],
+            timeout: 7
+        ) else { return false }
+        return status.trimmingCharacters(in: .whitespacesAndNewlines) == "200"
+    }
+
+    static func waitUntilOnline(ssid: String, timeout: TimeInterval) async throws -> Verification {
         let deadline = Date().addingTimeInterval(timeout)
         var lastSSID: String? = nil
         var lastGateway: String? = nil
         while Date() < deadline {
             let current = await HotspotJoiner.currentSSID()
             lastSSID = current
-            if (current == nil || current == ssid),
-               let gateway = await defaultGateway(),
-               ping(gateway) {
-                return gateway
+            if current == ssid,
+               let interface = try? await HotspotJoiner.wifiInterface(),
+               let gateway = await defaultGateway(interface: interface),
+               await ping(gateway, interface: interface) {
+                return Verification(
+                    wifiInterface: interface,
+                    gateway: gateway,
+                    internetReachable: await internetReachable(interface: interface)
+                )
             }
-            if let g = await defaultGateway() { lastGateway = g }
+            if let interface = try? await HotspotJoiner.wifiInterface(),
+               let gateway = await defaultGateway(interface: interface) {
+                lastGateway = gateway
+            }
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
         throw BleError.timeout(

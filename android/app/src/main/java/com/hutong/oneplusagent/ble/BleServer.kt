@@ -51,6 +51,8 @@ class BleServer(
     )
 
     private val connectedDevices = CopyOnWriteArraySet<BluetoothDevice>()
+    private val replayPreferences = appContext.getSharedPreferences("ble_replay_guard", Context.MODE_PRIVATE)
+    private val replayLock = Any()
 
     private val advertiseCallback = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
@@ -134,20 +136,20 @@ class BleServer(
                 BluetoothGattCharacteristic(
                     BleProtocol.CMD_UUID,
                     BluetoothGattCharacteristic.PROPERTY_WRITE,
-                    BluetoothGattCharacteristic.PERMISSION_WRITE
+                    BluetoothGattCharacteristic.PERMISSION_WRITE_ENCRYPTED_MITM
                 )
             )
             addCharacteristic(
                 BluetoothGattCharacteristic(
                     BleProtocol.STATUS_UUID,
                     BluetoothGattCharacteristic.PROPERTY_READ or BluetoothGattCharacteristic.PROPERTY_NOTIFY,
-                    BluetoothGattCharacteristic.PERMISSION_READ
+                    BluetoothGattCharacteristic.PERMISSION_READ_ENCRYPTED_MITM
                 ).apply {
                     addDescriptor(
                         @Suppress("DEPRECATION")
                         BluetoothGattDescriptor(
                             CCCD_UUID,
-                            BluetoothGattDescriptor.PERMISSION_WRITE
+                            BluetoothGattDescriptor.PERMISSION_WRITE_ENCRYPTED_MITM
                         )
                     )
                 }
@@ -178,12 +180,32 @@ class BleServer(
         ) {
             if (characteristic.uuid != BleProtocol.CMD_UUID) return
             val bytes = value ?: ByteArray(0)
-            val command = BleProtocol.parseCommand(bytes, AgentConfig.SHARED_SECRET)
+            if (device.bondState != BluetoothDevice.BOND_BONDED) {
+                if (responseNeeded) gattServer?.sendResponse(device, requestId, android.bluetooth.BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION, 0, null)
+                return
+            }
+            if (connectedDevices.add(device)) listener.onClientConnected(true)
+            val command = BleProtocol.parseCommand(bytes, AgentConfig.sharedSecret(appContext))
             if (command == null) {
                 Log.w(TAG, "CMD 帧无效（长度=${bytes.size} 或鉴权失败），已忽略")
                 if (responseNeeded) {
                     gattServer?.sendResponse(device, requestId, android.bluetooth.BluetoothGatt.GATT_FAILURE, 0, null)
                 }
+                return
+            }
+            val key = "last_" + device.address.filter { it.isLetterOrDigit() }
+            val accepted = synchronized(replayLock) {
+                val now = System.currentTimeMillis()
+                val previous = replayPreferences.getLong(key, 0L)
+                if (!BleProtocol.isFreshNonce(command.nonce, now, previous)) {
+                    false
+                } else {
+                    replayPreferences.edit().putLong(key, command.nonce ushr 16).commit()
+                }
+            }
+            if (!accepted) {
+                if (responseNeeded) gattServer?.sendResponse(device, requestId, android.bluetooth.BluetoothGatt.GATT_FAILURE, 0, null)
+                Log.w(TAG, "重放的 CMD 帧已拒绝")
                 return
             }
             Log.i(TAG, "收到指令 cmd=0x%02x nonce=0x%08x".format(command.cmd, command.nonce))
@@ -218,6 +240,10 @@ class BleServer(
         ) {
             // CCCD 订阅成功后立即推一帧当前状态，Mac 无需额外 GET_STATUS
             if (descriptor.uuid == CCCD_UUID) {
+                if (device.bondState != BluetoothDevice.BOND_BONDED) {
+                    if (responseNeeded) gattServer?.sendResponse(device, requestId, android.bluetooth.BluetoothGatt.GATT_INSUFFICIENT_AUTHENTICATION, 0, null)
+                    return
+                }
                 if (responseNeeded) {
                     gattServer?.sendResponse(
                         device, requestId, android.bluetooth.BluetoothGatt.GATT_SUCCESS, 0, null
@@ -225,6 +251,7 @@ class BleServer(
                 }
                 val ch = service?.getCharacteristic(BleProtocol.STATUS_UUID)
                 if (ch != null && value != null && value.isNotEmpty() && value[0].toInt() != 0) {
+                    if (connectedDevices.add(device)) listener.onClientConnected(true)
                     @Suppress("DEPRECATION")
                     ch.value = statusBytes
                     @Suppress("DEPRECATION")

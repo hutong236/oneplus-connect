@@ -20,6 +20,22 @@
         android:text="状态：未启动"
         android:textSize="14sp" />
 
+    <EditText
+        android:id="@+id/pairingSecret"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:hint="BLE 配对密钥（至少 32 字节）"
+        android:inputType="textPassword"
+        android:importantForAutofill="no"
+        android:saveEnabled="false"
+        android:singleLine="true" />
+
+    <Button
+        android:id="@+id/btnSavePairingSecret"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="安全保存配对密钥" />
+
     <Button
         android:id="@+id/btnStartService"
         android:layout_width="match_parent"
