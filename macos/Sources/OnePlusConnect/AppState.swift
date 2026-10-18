@@ -35,7 +35,7 @@ final class AppState: ObservableObject {
             case .leavingWifi: return "正在退出手机热点 Wi-Fi …"
             case .disconnected(let warning): return "已断开；\(warning)"
             case .connected(let gateway, let internet):
-                return internet ? "热点已连接（网关 \(gateway)，互联网可达）" : "热点已连接（网关 \(gateway)，互联网不可直连）"
+                return internet ? "热点已连接（网关 \(gateway)，互联网探测通过）" : "热点已连接（网关 \(gateway)，互联网探测未通过）"
             case .failed(let reason): return "失败：\(reason)"
             }
         }
@@ -141,7 +141,7 @@ final class AppState: ObservableObject {
             phase = .connected(gateway: verification.gateway,
                                internetReachable: verification.internetReachable)
             reconnectAttempts = 0
-            note("热点链路已验证：\(verification.wifiInterface)，网关 \(verification.gateway)，直连互联网 \(verification.internetReachable ? "可达" : "不可达（Clash TUN/运营商网络请分别验收）")")
+            note("热点链路已验证：\(verification.wifiInterface)，网关 \(verification.gateway)，互联网探测\(verification.internetReachable ? "通过" : "未通过（不代表无法上网）")，按当前系统路由检测")
         } catch {
             phase = .failed(error.localizedDescription)
             note("失败：\(error.localizedDescription)")

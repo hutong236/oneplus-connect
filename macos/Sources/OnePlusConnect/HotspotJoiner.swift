@@ -198,13 +198,15 @@ enum ConnectivityCheck {
         (try? await Shell.run("/sbin/ping", ["-b", interface, "-c", "1", "-W", "2000", host], timeout: 4)) != nil
     }
 
-    static func internetReachable(interface: String) async -> Bool {
-        guard let status = try? await Shell.run(
+    static func internetReachable(
+        execute: (String, [String], TimeInterval) async throws -> String = Shell.run
+    ) async -> Bool {
+        guard let status = try? await execute(
             "/usr/bin/curl",
-            ["--interface", interface, "--noproxy", "*", "--connect-timeout", "3", "--max-time", "5",
+            ["--connect-timeout", "3", "--max-time", "5",
              "-sS", "-o", "/dev/null", "-w", "%{http_code}",
              "https://www.apple.com/library/test/success.html"],
-            timeout: 7
+            7
         ) else { return false }
         return status.trimmingCharacters(in: .whitespacesAndNewlines) == "200"
     }
@@ -223,7 +225,7 @@ enum ConnectivityCheck {
                 return Verification(
                     wifiInterface: interface,
                     gateway: gateway,
-                    internetReachable: await internetReachable(interface: interface)
+                    internetReachable: await internetReachable()
                 )
             }
             if let interface = try? await HotspotJoiner.wifiInterface(),

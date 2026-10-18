@@ -59,9 +59,9 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 |---|---|---|---|
 | P0 | BLE 通信 | Mac 能发现 OnePlus 6T 并发送指令 | 已实机连接；完整验收见清单 |
 | P0 | 热点自动控制 | 手机收到指令后自动开启共享热点 | Root 开启/关闭已由实机日志确认 |
-| P0 | Mac 自动联网 | 自动加入 mmmmmm 并验证连通 | 热点链路已实机验证；直连互联网待验收 |
-| P1 | 锁屏运行 / 自动重连 / 菜单栏管理 | 后台服务、重连开关、蓝牙恢复及断开行为 | 手机蓝牙恢复已实机验证；长时锁屏、Mac 自动重连策略及重启待验收 |
-| P2 | Clash(TUN) 兼容 | 开关 TUN 时连接/断开正常 | 已区分热点链路与直连出口；TUN 开关待实机验收 |
+| P0 | Mac 自动联网 | 自动加入 mmmmmm 并验证连通 | 热点链路已实机验证；互联网探测误判修复后待复测 |
+| P1 | 锁屏运行 / 自动重连 / 菜单栏管理 | 后台服务、重连开关、蓝牙恢复及断开行为 | 手机蓝牙恢复已实机验证；其余计划测试用户确认完成 |
+| P2 | Clash(TUN) 兼容 | 开关 TUN 时连接/断开正常 | 用户确认可上网；互联网探测改为遵循当前系统路由，待复测状态显示 |
 
 详细设计见 [docs/architecture.md](docs/architecture.md)、[docs/ble-protocol.md](docs/ble-protocol.md)、[docs/hotspot-strategies.md](docs/hotspot-strategies.md)。
 
