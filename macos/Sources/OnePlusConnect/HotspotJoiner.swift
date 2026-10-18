@@ -39,30 +39,61 @@ enum Shell {
     }
 }
 
-/// Wi-Fi 接入：networksetup 优先（密码可来自钥匙串），NEHotspotConfiguration 兜底
+/// Wi-Fi 接入：networksetup 优先（密码可来自钥匙串），解析兼容中英文系统
 enum HotspotJoiner {
 
-    /// 从 networksetup 硬件端口列表解析 Wi-Fi 对应的设备名（通常 en0）
+    /// 硬件端口列表解析（兼容中英文系统输出），失败时回退 en0 并用 ipconfig 验证
     static func wifiInterface() async throws -> String {
-        let output = try await Shell.run("/usr/sbin/networksetup", ["-listallhardwareports"])
-        var lines = output.components(separatedBy: .newlines)
-        while let idx = lines.firstIndex(where: { $0.trimmingCharacters(in: .whitespaces) == "Hardware Port: Wi-Fi" }) {
-            if let deviceLine = lines[(idx + 1)...].first(where: { $0.hasPrefix("Device:") }) {
-                let dev = deviceLine.replacingOccurrences(of: "Device:", with: "")
-                    .trimmingCharacters(in: .whitespaces)
-                if !dev.isEmpty { return dev }
+        if let output = try? await Shell.run("/usr/sbin/networksetup", ["-listallhardwareports"]) {
+            var lines = output.components(separatedBy: .newlines)
+            let portHeader: (String) -> Bool = { line in
+                let t = line.trimmingCharacters(in: .whitespaces)
+                return t == "Hardware Port: Wi-Fi" || t == "硬件端口: Wi-Fi" || t == "硬件端口：Wi-Fi"
             }
-            lines.removeSubrange(idx...)
+            while let idx = lines.firstIndex(where: portHeader) {
+                if let deviceLine = lines[(idx + 1)...].first(where: { $0.hasPrefix("Device:") || $0.hasPrefix("设备:") }) {
+                    let dev = deviceLine
+                        .replacingOccurrences(of: "Device:", with: "")
+                        .replacingOccurrences(of: "设备:", with: "")
+                        .trimmingCharacters(in: .whitespaces)
+                    if !dev.isEmpty { return dev }
+                }
+                lines.removeSubrange(idx...)
+            }
+        }
+        // 回退：ipconfig getsummary 输出与系统语言无关
+        for iface in ["en0", "en1"] {
+            if let summary = try? await Shell.run("/usr/sbin/ipconfig", ["getsummary", iface]),
+               summary.contains("SSID = ") {
+                return iface
+            }
         }
         throw BleError.connectFailed("未找到 Wi-Fi 硬件端口")
     }
 
+    /// SSID 读取：networksetup（双语）→ ipconfig（与语言无关）；新版 macOS 已移除 airport 工具
     static func currentSSID() async -> String? {
-        guard let port = try? await wifiInterface() else { return nil }
-        guard let output = try? await Shell.run("/usr/sbin/networksetup", ["-getairportnetwork", port]) else { return nil }
-        // 输出形如 "Current Wi-Fi Network: mmmmmm"
-        guard let range = output.range(of: "Current Wi-Fi Network: ") else { return nil }
-        return String(output[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+        if let port = try? await wifiInterface(),
+           let output = try? await Shell.run("/usr/sbin/networksetup", ["-getairportnetwork", port]) {
+            for prefix in ["Current Wi-Fi Network: ", "当前 Wi-Fi 网络：", "当前 Wi-Fi 网络: "] {
+                if let range = output.range(of: prefix) {
+                    let ssid = String(output[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !ssid.isEmpty { return ssid }
+                }
+            }
+        }
+        if let port = try? await wifiInterface(),
+           let summary = try? await Shell.run("/usr/sbin/ipconfig", ["getsummary", port]) {
+            for line in summary.components(separatedBy: .newlines) {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("SSID = ") {
+                    let ssid = String(trimmed.dropFirst("SSID = ".count))
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    if !ssid.isEmpty { return ssid }
+                }
+            }
+        }
+        return nil
     }
 
     static func join(ssid: String, password: String) async throws {
@@ -119,11 +150,12 @@ enum ConnectivityCheck {
         }
     }
 
-    /// 轮询直到 SSID 匹配且网关可 ping；返回网关地址
+    /// 轮询直到 SSID 匹配且网关可 ping；SSID 读取失败时退化为仅凭网关可达判定
     static func waitUntilOnline(ssid: String, timeout: TimeInterval) async throws -> String {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
-            if let current = await HotspotJoiner.currentSSID(), current == ssid,
+            let current = await HotspotJoiner.currentSSID()
+            if (current == nil || current == ssid),
                let gateway = await defaultGateway(),
                ping(gateway) {
                 return gateway

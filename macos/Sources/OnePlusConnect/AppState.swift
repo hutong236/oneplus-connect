@@ -84,7 +84,12 @@ final class AppState: ObservableObject {
             phase = .joiningWifi
             let ssid = status.ssid ?? AppConfig.hotspotSSID
             note("热点已开启（SSID: \(ssid)），加入 Wi-Fi …")
-            try await HotspotJoiner.join(ssid: ssid, password: AppConfig.wifiPassword)
+            // 入网命令失败不直接判死：系统自动加入/已在网也算数，交由连通性轮询裁决
+            do {
+                try await HotspotJoiner.join(ssid: ssid, password: AppConfig.wifiPassword)
+            } catch {
+                note("networksetup 返回：\(error.localizedDescription)（继续验证实际状态）")
+            }
 
             phase = .verifying
             let gateway = try await ConnectivityCheck.waitUntilOnline(ssid: ssid,
