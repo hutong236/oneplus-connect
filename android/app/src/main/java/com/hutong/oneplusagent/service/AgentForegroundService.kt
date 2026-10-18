@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.bluetooth.BluetoothAdapter
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -21,6 +22,7 @@ import android.util.Log
 import com.hutong.oneplusagent.MainActivity
 import com.hutong.oneplusagent.ble.BleServer
 import com.hutong.oneplusagent.core.BleProtocol
+import com.hutong.oneplusagent.core.BleLifecycle
 import com.hutong.oneplusagent.hotspot.HotspotController
 import java.util.concurrent.Executors
 
@@ -39,15 +41,32 @@ class AgentForegroundService : Service(), BleServer.Listener {
     private val main = Handler(Looper.getMainLooper())
     private val executor = Executors.newSingleThreadExecutor()
     private lateinit var ble: BleServer
+    private lateinit var bleLifecycle: BleLifecycle
     private lateinit var hotspot: HotspotController
 
     @Volatile
     private var cmdFailed = false
 
-    private val apStateReceiver = object : BroadcastReceiver() {
+    private val systemStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
-            // 热点开关状态变化时主动推送（受保护系统广播，允许接收）
-            pushStatus()
+            when (intent?.action) {
+                AP_STATE_ACTION -> pushStatus()
+                BluetoothAdapter.ACTION_STATE_CHANGED -> when (
+                    intent.getIntExtra(BluetoothAdapter.EXTRA_STATE, BluetoothAdapter.ERROR)
+                ) {
+                    BluetoothAdapter.STATE_ON -> {
+                        val ok = bleLifecycle.startIfNeeded()
+                        updateNotification(if (ok) "BLE 广播已恢复，等待 Mac 连接" else "BLE 广播恢复失败，请重试")
+                        Log.i(TAG, "蓝牙开启，恢复 BLE ble=$ok")
+                        if (ok) pushStatus()
+                    }
+                    BluetoothAdapter.STATE_TURNING_OFF, BluetoothAdapter.STATE_OFF -> {
+                        bleLifecycle.pause()
+                        updateNotification("蓝牙已关闭，开启后自动恢复")
+                        Log.i(TAG, "蓝牙关闭，暂停 BLE")
+                    }
+                }
+            }
         }
     }
 
@@ -55,23 +74,23 @@ class AgentForegroundService : Service(), BleServer.Listener {
         super.onCreate()
         hotspot = HotspotController(this)
         ble = BleServer(this, this)
-        registerReceiver(apStateReceiver, IntentFilter(AP_STATE_ACTION))
+        bleLifecycle = BleLifecycle(start = { ble.start() }, stop = { ble.stop() })
+        registerReceiver(systemStateReceiver, IntentFilter(AP_STATE_ACTION).apply {
+            addAction(BluetoothAdapter.ACTION_STATE_CHANGED)
+        })
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startInForeground()
-        val ok = ble.start()
+        val ok = bleLifecycle.startIfNeeded()
         updateNotification(if (ok) "BLE 广播中，等待 Mac 连接" else "蓝牙未开启，请打开蓝牙后重试")
         Log.i(TAG, "服务启动 ble=$ok")
-        // 调试入口：adb 可直接注入指令，与 BLE 路径走同一分发逻辑
-        // 例：adb shell am start-foreground-service \
-        //     -n com.hutong.oneplusagent/.service.AgentForegroundService --ei cmd 16
         return START_STICKY
     }
 
     override fun onDestroy() {
-        unregisterReceiver(apStateReceiver)
-        ble.stop()
+        unregisterReceiver(systemStateReceiver)
+        bleLifecycle.shutdown()
         hotspot.shutdown()
         executor.shutdownNow()
         super.onDestroy()
@@ -87,6 +106,11 @@ class AgentForegroundService : Service(), BleServer.Listener {
 
     override fun onClientConnected(connected: Boolean) {
         Log.i(TAG, "Mac 连接状态: $connected")
+    }
+
+    override fun onAdvertisingFailed(errorCode: Int) {
+        bleLifecycle.onStartFailed()
+        updateNotification("BLE 广播失败（$errorCode），请重新启动后台服务")
     }
 
     private fun handleCommand(cmd: Int) {

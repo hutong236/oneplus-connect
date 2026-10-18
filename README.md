@@ -13,7 +13,7 @@ Mac 自动加入 Wi-Fi mmmmmm → 验证连通性 → 完成
 ## 仓库结构
 
 ```
-my-Android-wlan/
+oneplus-connect/
 ├── android/    OnePlus Agent —— Kotlin 安卓端：BLE 外设 + 热点控制 + 前台服务
 ├── macos/      OnePlus Connect —— SwiftUI 菜单栏应用：BLE 中心设备 + 自动入网
 ├── docs/       架构设计、BLE 协议、热点控制策略
@@ -34,7 +34,7 @@ bash script/build_and_run.sh
 
 ### Android 端（OnePlus Agent）
 
-依赖：JDK 17+、Android SDK（Platform 34）。本机尚未安装 SDK/Gradle，可任选其一：
+依赖：JDK 17+、Android SDK（Platform 34）。尚未安装 SDK 时，可任选其一：
 
 ```bash
 # 方式一：安装 Android Studio（图形界面，推荐日常开发）
@@ -57,16 +57,16 @@ adb install app/build/outputs/apk/debug/app-debug.apk
 
 | 优先级 | 工作 | 验收标准 | 状态 |
 |---|---|---|---|
-| P0 | BLE 通信 | Mac 能发现 OnePlus 6T 并发送指令 | 🔨 开发中 |
-| P0 | 热点自动控制 | 手机收到指令后自动开启共享热点 | 🔨 开发中（先验证无 Root 方案） |
-| P0 | Mac 自动联网 | 自动加入 mmmmmm 并验证连通 | 🔨 开发中 |
-| P1 | 锁屏运行 / 自动重连 / 菜单栏管理 | — | ⏳ |
-| P2 | Clash(TUN) 兼容 | 开关 TUN 时连接/断开正常 | ⏳ |
+| P0 | BLE 通信 | Mac 能发现 OnePlus 6T 并发送指令 | 已实机连接；完整验收见清单 |
+| P0 | 热点自动控制 | 手机收到指令后自动开启共享热点 | Root 开启/关闭已由实机日志确认 |
+| P0 | Mac 自动联网 | 自动加入 mmmmmm 并验证连通 | 热点链路已实机验证；直连互联网待验收 |
+| P1 | 锁屏运行 / 自动重连 / 菜单栏管理 | 后台服务、重连开关、蓝牙恢复及断开行为 | 手机蓝牙恢复已实机验证；长时锁屏、Mac 自动重连策略及重启待验收 |
+| P2 | Clash(TUN) 兼容 | 开关 TUN 时连接/断开正常 | 已区分热点链路与直连出口；TUN 开关待实机验收 |
 
 详细设计见 [docs/architecture.md](docs/architecture.md)、[docs/ble-protocol.md](docs/ble-protocol.md)、[docs/hotspot-strategies.md](docs/hotspot-strategies.md)。
 
-## 当前环境事实（2026-10 检测）
+## 当前环境事实（2026-10-19）
 
-- Mac：en0 = 192.168.105.154，已接入 mmmmmm，默认网关 192.168.105.34
-- OnePlus 6T：wlan0 = 192.168.105.34（网关即手机），rmnet_data2 为移动数据出口
-- 手机未 Root、Bootloader 锁定；目标设备 Android 11（API 30）
+- OnePlus 6T 运行 Android 11（API 30）；应用的 Root 热点控制路径已成功执行开启和关闭，不能再按“未 Root”描述。
+- Mac 的热点连接使用 en0，手机热点使用 wlan0；IP 与网关由 DHCP 动态分配，不作为固定配置。
+- 手机 Agent 前台服务和电池优化白名单已确认。完整真机结果以 [验收清单](docs/real-device-acceptance.md) 为准，单元测试不代表真机通过。

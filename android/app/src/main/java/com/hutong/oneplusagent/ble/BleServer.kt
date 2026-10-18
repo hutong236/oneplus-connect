@@ -13,6 +13,8 @@ import android.bluetooth.le.AdvertiseData
 import android.bluetooth.le.AdvertiseSettings
 import android.content.Context
 import android.os.ParcelUuid
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import com.hutong.oneplusagent.core.AgentConfig
 import com.hutong.oneplusagent.core.BleProtocol
@@ -31,6 +33,8 @@ class BleServer(
         /** 收到通过鉴权的指令；返回后由服务端回 ACK */
         fun onCommand(cmd: Int)
         fun onClientConnected(connected: Boolean)
+        /** Delivered on the main thread, only for the current advertising attempt. */
+        fun onAdvertisingFailed(errorCode: Int)
     }
 
     companion object {
@@ -44,6 +48,8 @@ class BleServer(
     private var gattServer: BluetoothGattServer? = null
     private var service: BluetoothGattService? = null
     private var advertising = false
+    private val main = Handler(Looper.getMainLooper())
+    private var advertiseCallback: AdvertiseCallback? = null
 
     @Volatile
     private var statusBytes: ByteArray = BleProtocol.encodeStatus(
@@ -54,13 +60,20 @@ class BleServer(
     private val replayPreferences = appContext.getSharedPreferences("ble_replay_guard", Context.MODE_PRIVATE)
     private val replayLock = Any()
 
-    private val advertiseCallback = object : AdvertiseCallback() {
+    private fun newAdvertiseCallback() = object : AdvertiseCallback() {
         override fun onStartSuccess(settingsInEffect: AdvertiseSettings?) {
-            Log.i(TAG, "BLE 广播已开启")
+            main.post {
+                if (advertiseCallback === this) Log.i(TAG, "BLE 广播已开启")
+            }
         }
 
         override fun onStartFailure(errorCode: Int) {
-            Log.e(TAG, "BLE 广播失败 errorCode=$errorCode")
+            main.post {
+                if (advertiseCallback !== this) return@post
+                advertising = false
+                Log.e(TAG, "BLE 广播失败 errorCode=$errorCode")
+                listener.onAdvertisingFailed(errorCode)
+            }
         }
     }
 
@@ -97,15 +110,19 @@ class BleServer(
         val scanResponse = AdvertiseData.Builder()
             .setIncludeDeviceName(true)
             .build()
-        advertiser.startAdvertising(settings, data, scanResponse, advertiseCallback)
+        val callback = newAdvertiseCallback()
+        advertiseCallback = callback
+        advertiser.startAdvertising(settings, data, scanResponse, callback)
         advertising = true
         return true
     }
 
     fun stop() {
-        if (advertising) {
+        val callback = advertiseCallback
+        advertiseCallback = null
+        if (advertising && callback != null) {
             try {
-                bluetoothManager.adapter?.bluetoothLeAdvertiser?.stopAdvertising(advertiseCallback)
+                bluetoothManager.adapter?.bluetoothLeAdvertiser?.stopAdvertising(callback)
             } catch (t: Throwable) {
                 Log.w(TAG, "stopAdvertising: $t")
             }
