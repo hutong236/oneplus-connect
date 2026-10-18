@@ -1,0 +1,22 @@
+# macOS
+.DS_Store
+*.swp
+
+# Xcode / SPM
+macos/.build/
+macos/.swiftpm/
+macos/*.xcodeproj/
+DerivedData/
+
+# Android / Gradle
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+android/.idea/
+android/captures/
+*.apk
+*.aab
+
+# Secrets
+*.env
