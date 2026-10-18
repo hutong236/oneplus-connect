@@ -15,5 +15,5 @@ enum AppConfig {
 
     static let scanTimeout: TimeInterval = 10
     static let hotspotTimeout: TimeInterval = 15
-    static let joinTimeout: TimeInterval = 25
+    static let joinTimeout: TimeInterval = 45
 }

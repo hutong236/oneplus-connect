@@ -125,10 +125,13 @@ enum HotspotJoiner {
     }
 
     static func join(ssid: String, password: String) async throws {
+        // 已在该网络上则不打扰（重连会打断已有关联，拖慢整体时序）
+        if await currentSSID() == ssid { return }
+
         let port = try await wifiInterface()
         try await Shell.run("/usr/sbin/networksetup", ["-setairportpower", port, "on"], timeout: 10)
 
-        // 密码优先级：Config 显式配置 → 钥匙串查询 → 空（无密码加入可能挂起，用短超时兜住）
+        // 密码优先级：Config 显式配置 → 钥匙串查询 → 空（无密码加入可能挂起，用超时兜住）
         var pw = password
         if pw.isEmpty {
             pw = await keychainWifiPassword(ssid: ssid) ?? ""
@@ -137,9 +140,9 @@ enum HotspotJoiner {
         if !pw.isEmpty {
             try await Shell.run("/usr/sbin/networksetup", ["-setairportnetwork", port, ssid, pw], timeout: 30)
         } else {
-            // 无密码：macOS 会等一个不会出现的 GUI 密码框 → 8 秒强杀；
-            // 失败也无妨：已知网络通常已被系统自动加入，交由连通性轮询裁决
-            try? await Shell.run("/usr/sbin/networksetup", ["-setairportnetwork", port, ssid], timeout: 8)
+            // 无密码：若系统在关联中，杀太早会打断自动加入 → 给 20 秒；
+            // 若真在等 GUI 密码框则被超时杀掉，交由连通性轮询裁决
+            try? await Shell.run("/usr/sbin/networksetup", ["-setairportnetwork", port, ssid], timeout: 20)
         }
     }
 
@@ -196,15 +199,21 @@ enum ConnectivityCheck {
     /// 轮询直到 SSID 匹配且网关可 ping；SSID 读取失败时退化为仅凭网关可达判定
     static func waitUntilOnline(ssid: String, timeout: TimeInterval) async throws -> String {
         let deadline = Date().addingTimeInterval(timeout)
+        var lastSSID: String? = nil
+        var lastGateway: String? = nil
         while Date() < deadline {
             let current = await HotspotJoiner.currentSSID()
+            lastSSID = current
             if (current == nil || current == ssid),
                let gateway = await defaultGateway(),
                ping(gateway) {
                 return gateway
             }
+            if let g = await defaultGateway() { lastGateway = g }
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
-        throw BleError.timeout("Wi-Fi 加入/连通性验证超时（\(Int(timeout))s）")
+        throw BleError.timeout(
+            "Wi-Fi 加入/连通性验证超时（\(Int(timeout))s）。当前 SSID=\(lastSSID ?? "未知")，网关=\(lastGateway ?? "无")"
+        )
     }
 }
