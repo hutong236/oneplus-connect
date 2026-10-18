@@ -50,6 +50,24 @@ class MainActivity : Activity() {
 
         requestRuntimePermissions()
         refreshStatus()
+        handleDebugIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        handleDebugIntent(intent)
+    }
+
+    /** 调试入口：adb shell am start -n .MainActivity --ei cmd 16（Activity 前台路径，绕过后台冻结） */
+    private fun handleDebugIntent(intent: Intent?) {
+        val cmd = intent?.getIntExtra("cmd", -1) ?: -1
+        if (cmd == -1) return
+        android.util.Log.i("OnePlusAgent", "Activity 收到调试指令 cmd=0x%02x".format(cmd))
+        appendLog("调试指令 0x%02x".format(cmd))
+        startForegroundService(
+            Intent(this, com.hutong.oneplusagent.service.AgentForegroundService::class.java)
+                .putExtra("cmd", cmd)
+        )
     }
 
     override fun onResume() {

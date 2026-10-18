@@ -1,58 +1,40 @@
 # Android 11 热点控制策略（无 Root 优先）
 
-目标：OnePlus 6T（A6010，OxygenOS / Android 11，未 Root、BL 锁定）上，让 App 收到 BLE 指令后**自动**开启/关闭 Wi-Fi 共享热点。
+目标：OnePlus 6T（A6010，OxygenOS / Android 11，未 Root、BL 锁定，中国电信）上，让 App 收到 BLE 指令后**自动**开启/关闭可共享网络的热点。
 
-公开 SDK 中没有开关热点的 API（`setWifiApEnabled` 自 API 25 起隐藏）。策略链按优先级依次尝试：
+## 实测结论（2026-10-18，真机验证）
 
-## 策略 1：反射调用 `ConnectivityManager.startTethering`（无 Root 首选）
+| # | 路径 | 调用身份 | 结果 |
+|---|---|---|---|
+| 1 | `TetheringManager.startTethering`（反射，签名自适应） | App (uid 10037) | 调用成功送达服务端，回 `error=14 ENTITLEMENT_TIMEOUT` ✗ |
+| 2 | 同上 + `setExemptFromEntitlementCheck(true)` | App | 仍 error=14（豁免未被服务端认可）✗ |
+| 3 | 同上（app_process 实测） | **shell (uid 2000，持有 TETHER_PRIVILEGED)** | 仍 error=14 ✗ |
+| 4 | 直连 `ITetheringConnector.startTethering` + 伪造 `callerPkg="com.android.settings"` | shell | 无响应 ✗ |
+| 5 | `cmd wifi start-softap` | shell | SecurityException：需 `MAINLINE_NETWORK_STACK` ✗ |
+| 6 | `WifiManager.setWifiApEnabled`（反射） | shell | 方法已从该框架删除 ✗ |
+| 7 | `WifiManager.startTetheredHotspot`（SoftApConfiguration） | shell | SecurityException：需 `MAINLINE_NETWORK_STACK` ✗ |
 
-```kotlin
-// 隐藏签名：startTethering(int type, boolean showProvisioningUi,
-//                          OnStartTetheringCallback callback, Handler handler)
-// type: TETHERING_WIFI = 0
-```
+**结论：双重墙 —— tethering 侧 entitlement（连 shell 都拦）+ wifi 侧 MAINLINE_NETWORK_STACK。无 Root 无法全自动开启可共享网络的热点。**
 
-- 属于灰名单（unsupported 但非禁止）隐藏 API，Android 11 上反射调用通常不被拦截。
-- `OnStartTetheringCallback` 是隐藏抽象类，普通编译无法继承；实际以 `null` 回调调用，
-  **用 `WifiManager.isWifiApEnabled()`（反射）轮询 10s 确认结果**。
-- OxygenOS 定制可能收窄，真机实测为准 —— 这正是 P0 的核心验证点。
-- 验证命令（adb，无需 App）：
+可行路线（二选一）：
+
+- **A. Magisk Root（推荐，已获用户预授权）**：解锁 BL（会清数据）→ Magisk → App 用 `su -c` 以 root 身份跑 app_process 调 `startTethering`（root 通过一切检查）。本次实验中的 `TetherTest*.java`（/tmp/tethertest/）即为该路径的验证代码，可移植进 App assets。
+- **B. 降级方案**：BLE 收指令后自动拉起热点设置页（当前策略链兜底行为），用户点一下开关。无 Root 但保留一次手动操作。
+
+## 环境坑位记录（同样实测）
+
+- **权限对话框卡锁屏**：App 首启 `requestPermissions` 弹出的系统对话框在锁屏后成为栈顶，阻塞一切后续 intent。修复：`adb shell pm grant <pkg> android.permission.ACCESS_FINE_LOCATION`，或先解锁屏幕。`am start` 需带 `-f 0x10080000`（NEW_TASK|CLEAR_TASK）清理。
+- **OPBF（OnePlus Background Freeze）**：后台 App 被 cgroup 冻结，广播静默超时。P1 必须让用户在「电池 → 应用优化」加白名单 + 开启自启动。
+- **隐藏 API 可达性**：`TetheringManager` 全家（含 `TetheringRequest$Builder`、`isWifiApEnabled`）反射可达（灰名单）；但 `ConnectivityManager.mTetheringManager` 字段是**黑名单**（denied）。实例获取可用 `context.getSystemService("tethering")`。
+- 本机 TetheringManager 实际签名：`startTethering(TetheringManager$TetheringRequest, Executor, StartTetheringCallback)`（TetheringRequest 为嵌套类，与 AOSP 顶层类不同）。
+- `ACCESS_WIFI_STATE` 必须声明（普通权限），否则 `isWifiApEnabled` 抛 SecurityException。
+- Android 11 无 `svc bluetooth enable`（13+ 才有）、`cmd bluetooth_manager enable` 未实现 → 蓝牙需用户手动开。
+
+## adb 调试通道
 
 ```bash
-adb shell dumpsys tethering | head -30          # 查看热点/tether 状态
-adb shell svc data enable                        # 确保移动数据在
+# App 内置（DebugCommandReceiver / MainActivity --ei cmd，与 BLE 同一分发逻辑）
+adb shell am start -f 0x10080000 -n com.hutong.oneplusagent/.MainActivity --ei cmd 16   # 16=CONNECT
+adb shell am broadcast --receiver-foreground -a com.hutong.oneplusagent.DEBUG_CMD --ei cmd 17
+adb logcat -s OnePlusAgent
 ```
-
-## 策略 2：Root / 系统权限通道（预留）
-
-当前设备未 Root，代码保留接口。若日后 Magisk：
-
-```bash
-su -c cmd wifi start-softap ap0     # Android 11 wifi shell（不同 ROM 命令有差异）
-```
-
-或借助 root 授予 App `WRITE_SETTINGS` + `TETHER_PRIVILEGED` 的变通方案，届时再定。
-
-## 策略 3：设置面板兜底（需手动点一下）
-
-```kotlin
-startActivity(Intent("android.settings.TETHER_SETTINGS"))
-```
-
-无法全自动，但保证功能可达：BLE 收到指令后自动拉起热点设置页，用户一次点击完成。
-App 内测试按钮也直接提供该入口。
-
-## 热点状态读取（与策略配合）
-
-`WIFI_AP_STATE_CHANGED` 受保护广播允许接收；AP 开关状态经 `WifiManager.getWifiApState()`
-（反射，隐藏）轮询。SSID 默认取配置常量 `mmmmmm`（热点由系统设置创建，名称不变）。
-
-## 结论与风险
-
-| 风险 | 影响 | 缓解 |
-|---|---|---|
-| startTethering 被 OxygenOS 拦截（SecurityException） | 策略 1 失败 | 降级策略 2/3；评估 Root |
-| 隐藏 API 在后续 OTA 变黑名单 | 升级后失效 | 锁定系统版本；或 Magisk |
-| startTethering 开的是「网络共享」而非「热点」 | 共享的是 USB/蓝牙 | type 固定 `TETHERING_WIFI(0)`，实测确认 |
-
-P0 验收：`adb logcat -s OnePlusAgent` 观察策略链日志，Mac 发 CONNECT 后 15s 内热点自动开启。

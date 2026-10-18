@@ -95,13 +95,15 @@ class HotspotController(private val context: Context) {
         val method = WifiManager::class.java.getMethod("isWifiApEnabled")
         method.invoke(wifi) as Boolean
     } catch (t: Throwable) {
-        Log.w(TAG, "isWifiApEnabled 反射失败: $t")
+        Log.w(TAG, "isWifiApEnabled 反射失败: $t cause=${(t as? java.lang.reflect.InvocationTargetException)?.cause}")
         false
     }
 
     // ---------- 策略 1：startTethering ----------
 
     private fun tryStartTethering(): Boolean {
+        // Android 11(R) 优先走 TetheringManager：回调是接口，可用动态代理构造
+        if (tryTetheringManagerStart()) return true
         return try {
             val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
             val callbackClass = Class.forName("android.net.ConnectivityManager\$OnStartTetheringCallback")
@@ -129,9 +131,103 @@ class HotspotController(private val context: Context) {
             Log.i(TAG, "startTethering 已调用 invoked=$invoked")
             true
         } catch (t: Throwable) {
-            Log.w(TAG, "startTethering 失败: $t")
+            Log.w(TAG, "startTethering 失败: $t cause=${(t as? java.lang.reflect.InvocationTargetException)?.cause}")
             false
         }
+    }
+
+    /** Android 11: TetheringManager.startTethering —— 按运行时实际签名自适应 */
+    private fun tryTetheringManagerStart(): Boolean {
+        try {
+            val tmClass = Class.forName("android.net.TetheringManager")
+            val tm = obtainTetheringManager()
+            if (tm == null) {
+                Log.w(TAG, "tm: 实例获取失败")
+                return false
+            }
+            Log.i(TAG, "tm: 实例获取成功 ${tm.javaClass.name}")
+
+            val method = tmClass.methods.firstOrNull { it.name == "startTethering" }
+                ?: run { Log.w(TAG, "tm: 无 startTethering 方法"); return false }
+            Log.i(TAG, "tm: 目标签名 (${method.parameterTypes.joinToString { it.name }})")
+
+            val callbackInterface = method.parameterTypes.last()
+            val proxy = java.lang.reflect.Proxy.newProxyInstance(
+                callbackInterface.classLoader, arrayOf(callbackInterface)
+            ) { _, m, args ->
+                when (m.name) {
+                    "onTetheringStarted" -> Log.i(TAG, "TetheringManager: onTetheringStarted")
+                    "onTetheringFailed" -> Log.w(TAG, "TetheringManager: onTetheringFailed error=${args?.firstOrNull()}")
+                }
+                null
+            }
+
+            // 第一个参数：TetheringRequest（顶层或嵌套类，ROM 实现有差异）或 int（旧签名）
+            val firstType = method.parameterTypes.firstOrNull()?.name
+            val firstArg: Any = when {
+                firstType == "int" -> TETHERING_WIFI
+                firstType?.endsWith("TetheringRequest") == true -> {
+                    val builderClass = Class.forName("$firstType\$Builder")
+                    val builder = builderClass
+                        .getConstructor(Int::class.javaPrimitiveType)
+                        .newInstance(TETHERING_WIFI)
+                    // 复刻系统设置页开关热点行为：用户显式指令即视为授权，跳过运营商检查
+                    runCatching {
+                        builderClass.getMethod("setExemptFromEntitlementCheck", Boolean::class.javaPrimitiveType)
+                            .invoke(builder, true)
+                    }.onFailure { Log.w(TAG, "tm: setExemptFromEntitlementCheck 不可用: $it") }
+                    builderClass.getMethod("build").invoke(builder)
+                }
+                else -> {
+                    Log.w(TAG, "tm: 未知首参类型 $firstType")
+                    return false
+                }
+            }
+
+            // Executor 参数：可能是 java.util.concurrent.Executor
+            val params = method.parameterTypes
+            val args = arrayOfNulls<Any>(params.size)
+            args[0] = firstArg
+            for (i in 1 until params.size) {
+                args[i] = when {
+                    java.util.concurrent.Executor::class.java.isAssignableFrom(params[i]) -> executor
+                    else -> proxy
+                }
+            }
+            method.invoke(tm, *args)
+            Log.i(TAG, "tm: startTethering 已调用")
+            return true
+        } catch (t: Throwable) {
+            Log.w(TAG, "TetheringManager.startTethering 失败: $t cause=${(t as? java.lang.reflect.InvocationTargetException)?.cause}")
+            return false
+        }
+    }
+
+    /** 枚举本机 TetheringManager 实际可用方法，便于适配不同 ROM */
+    private fun dumpTetheringManagerApi() {
+        try {
+            val tmClass = Class.forName("android.net.TetheringManager")
+            val methods = tmClass.declaredMethods.joinToString("; ") { m ->
+                "${m.name}(${m.parameterTypes.joinToString { it.simpleName }})"
+            }
+            Log.i(TAG, "TetheringManager API: $methods")
+        } catch (t: Throwable) {
+            Log.w(TAG, "dump TetheringManager 失败: $t")
+        }
+    }
+
+    private fun obtainTetheringManager(): Any? {
+        val tmClass = Class.forName("android.net.TetheringManager")
+        runCatching { return tmClass.getMethod("getInstance", Context::class.java).invoke(null, context) }
+        runCatching { return tmClass.getMethod("getInstance").invoke(null) }
+        runCatching {
+            val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+            val field = ConnectivityManager::class.java.getDeclaredField("mTetheringManager")
+            field.isAccessible = true
+            return field.get(cm)
+        }
+        runCatching { return context.getSystemService("tethering") }
+        return null
     }
 
     private fun tryStopTethering(): Boolean = try {
