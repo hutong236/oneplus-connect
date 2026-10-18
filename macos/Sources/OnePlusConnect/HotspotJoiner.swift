@@ -4,18 +4,6 @@ import CoreWLAN
 /// 子进程执行工具（真超时：到期强制 kill，防止 networksetup 等命令无限挂起）
 enum Shell {
 
-    private final class Once {
-        private let lock = NSLock()
-        private var done = false
-        func run(_ block: () -> Void) {
-            lock.lock()
-            let already = done
-            done = true
-            lock.unlock()
-            if !already { block() }
-        }
-    }
-
     static func run(_ launchPath: String, _ arguments: [String], timeout: TimeInterval = 30) async throws -> String {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: launchPath)
@@ -30,20 +18,17 @@ enum Shell {
                 cont.resume(throwing: error)
                 return
             }
-            let once = Once()
             DispatchQueue.global().async {
                 // 先读满到 EOF 再等待退出，避免管道缓冲区死锁
                 let data = pipe.fileHandleForReading.readDataToEndOfFile()
                 task.waitUntilExit()
                 let text = String(data: data, encoding: .utf8) ?? ""
-                once.run {
-                    if task.terminationReason == .exit, task.terminationStatus == 0 {
-                        cont.resume(returning: text)
-                    } else if task.terminationReason == .exit {
-                        cont.resume(throwing: ShellError(cmd: launchPath, code: Int(task.terminationStatus), output: text))
-                    } else {
-                        cont.resume(throwing: ShellError(cmd: launchPath, code: -1, output: "超时（\(Int(timeout))s）被强制终止"))
-                    }
+                if task.terminationReason == .exit, task.terminationStatus == 0 {
+                    cont.resume(returning: text)
+                } else if task.terminationReason == .exit {
+                    cont.resume(throwing: ShellError(cmd: launchPath, code: Int(task.terminationStatus), output: text))
+                } else {
+                    cont.resume(throwing: ShellError(cmd: launchPath, code: -1, output: "超时（\(Int(timeout))s）被强制终止"))
                 }
             }
             DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
@@ -132,7 +117,7 @@ enum HotspotJoiner {
         if await currentSSID() == ssid { return }
 
         let port = try await wifiInterface()
-        try await Shell.run("/usr/sbin/networksetup", ["-setairportpower", port, "on"], timeout: 10)
+        _ = try await Shell.run("/usr/sbin/networksetup", ["-setairportpower", port, "on"], timeout: 10)
 
         // 密码优先级：Config 显式配置 → 钥匙串查询 → 空（无密码加入可能挂起，用超时兜住）
         var pw = password
