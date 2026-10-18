@@ -74,3 +74,14 @@ adb logcat -s OnePlusAgent     # 期待：策略2 Root 成功 → 热点自动�
 - **Root 检测**：部分银行/支付类应用可能检测 Root。Magisk 设置里开 Zygisk + DenyList 可隐藏多数检测。
 - **救砖**：保留 `boot_stock_K62.img`；`fastboot boot twrp` 后可随时恢复或重刷。若要重新上锁 BL（`fastboot oem lock`），必须先恢复 stock boot 并确保系统原版，否则有变砖风险。
 - 整个流程不刷写任何分区（TWRP 仅临时引导；Magisk 修补的是 boot 且有 dd 备份），风险可控。
+
+## 实际执行记录（2026-10-18/19，已完成 ✅）
+
+- 解锁：`fastboot oem unlock` 返回 OKAY 后**需在手机上音量+电源确认**，且必须先在开发者选项打开「OEM 解锁」（`settings put` 无效，标志存持久分区）。
+- TWRP 官方 3.5.0_9-0 在本机引导即 CrashDump（init 崩溃）；**改用 `TWRP-3.6.2_11-OP6xT.img`（SourceForge oneplus-6-series 项目，SIDDK 构建）一次成功**。
+- SourceForge 主站/多数镜像对代理 IP 403/Cloudflare 盾；deac-riga 镜像最终由手机浏览器直接下载（用户手动传回 Mac）。
+- Magisk v30.7 经 TWRP `twrp install` 安装成功（检测 Stock boot → 修补 → 写回 boot_b）。
+- recovery 安装的 Magisk 应用是占位版（首开会联网下载完整版，国内慢）；**直接 `adb install -r Magisk-v30.7.apk` 离线替换即可**。
+- 首次 su 授权注意：`su -c id` 有 30s 超时，弹窗需**当次有效期内**点允许；永久授权走 Magisk 应用 → 超级用户。
+- **验收结果**：`cmd=16` → 策略2 Root → `onTetheringStarted`（error=14 消失）→ wlan0 UP + DHCP（192.168.6.x）；`cmd=17` → 热点关闭。**P0 热点自动控制闭环达成。**
+- 清数据副作用：热点 SSID/密码恢复出厂默认，需在手机设置里改回 `mmmmmm` 及原密码，Mac 端钥匙串密码才能复用。
