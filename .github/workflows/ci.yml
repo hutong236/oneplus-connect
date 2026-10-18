@@ -12,7 +12,7 @@ jobs:
       - name: Run macOS tests
         run: cd macos && swift test
       - name: Build macOS app
-        run: cd macos && swift build -c release
+        run: bash script/build_and_run.sh --build-only
   android:
     runs-on: ubuntu-latest
     steps:

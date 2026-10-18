@@ -18,6 +18,16 @@ security add-generic-password -U -s com.hutong.oneplusconnect -a ble-shared-secr
 
 BLE 首次写入要求系统建立加密 Bond；在手机和 Mac 上确认配对提示。若密钥未配置或长度不足，Mac 必须拒绝发送控制命令。
 
+Mac 请从仓库根目录运行 `bash script/build_and_run.sh`，以带有权限说明的应用包启动；首次连接允许位置权限以读取真实 SSID。`swift run` 裸程序不用于真机联网验收。
+
+热点 Wi-Fi 密码请单独保存，它不等于 BLE 配对密钥：
+
+```sh
+security add-generic-password -U -s com.hutong.oneplusconnect -a wifi-password:mmmmmm -w
+```
+
+若显示 `<redacted>`，检查应用位置权限；若网关仍为原路由器地址，检查手机热点 Wi-Fi 密码，先在系统 Wi-Fi 菜单手动连接验证。
+
 ## 验收步骤
 
 1. 在 OnePlus 6T Android 11 上安装 Debug APK，打开应用并启动前台服务；确认蓝牙开启、通知常驻。

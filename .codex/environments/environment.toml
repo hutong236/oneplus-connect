@@ -1,0 +1,10 @@
+version = 1
+name = "oneplus-connect"
+
+[setup]
+script = ""
+
+[[actions]]
+name = "Run"
+icon = "run"
+command = "bash script/build_and_run.sh"

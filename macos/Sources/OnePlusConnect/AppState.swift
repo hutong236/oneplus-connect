@@ -7,6 +7,7 @@ final class AppState: ObservableObject {
 
     enum Phase: Equatable {
         case idle
+        case requestingWiFiAccess
         case bleSearching
         case hotspotStarting
         case joiningWifi
@@ -16,7 +17,7 @@ final class AppState: ObservableObject {
 
         var isRunning: Bool {
             switch self {
-            case .bleSearching, .hotspotStarting, .joiningWifi, .verifying: return true
+            case .requestingWiFiAccess, .bleSearching, .hotspotStarting, .joiningWifi, .verifying: return true
             default: return false
             }
         }
@@ -24,6 +25,7 @@ final class AppState: ObservableObject {
         var label: String {
             switch self {
             case .idle: return "未连接"
+            case .requestingWiFiAccess: return "正在检查 Wi-Fi 读取权限，请允许位置访问 …"
             case .bleSearching: return "正在搜索 OnePlus 6T …"
             case .hotspotStarting: return "BLE 已连接，正在开启手机热点 …"
             case .joiningWifi: return "热点已开启，正在加入 Wi-Fi …"
@@ -90,6 +92,8 @@ final class AppState: ObservableObject {
                 note("缺少 BLE 配对密钥，未启动自动连接")
                 return
             }
+            phase = .requestingWiFiAccess
+            try await WiFiLocationAccess.shared.ensureAuthorized()
             phase = .bleSearching
             note("搜索 OnePlus Agent 广播 …")
             try await ble.ensurePoweredOn()
@@ -110,12 +114,7 @@ final class AppState: ObservableObject {
             phase = .joiningWifi
             let ssid = status.ssid ?? AppConfig.hotspotSSID
             note("热点已开启（SSID: \(ssid)），加入 Wi-Fi …")
-            // 入网命令失败不直接判死：系统自动加入/已在网也算数，交由连通性轮询裁决
-            do {
-                try await HotspotJoiner.join(ssid: ssid, password: AppConfig.wifiPassword)
-            } catch {
-                note("networksetup 返回：\(error.localizedDescription)（继续验证实际状态）")
-            }
+            try await HotspotJoiner.join(ssid: ssid, password: AppConfig.wifiPassword)
 
             phase = .verifying
             let verification = try await ConnectivityCheck.waitUntilOnline(ssid: ssid,
@@ -127,7 +126,7 @@ final class AppState: ObservableObject {
         } catch {
             phase = .failed(error.localizedDescription)
             note("失败：\(error.localizedDescription)")
-            scheduleReconnect()
+            if !(error is WiFiAccessError) { scheduleReconnect() }
         }
     }
 

@@ -1,4 +1,5 @@
 import Foundation
+import CoreWLAN
 
 /// 子进程执行工具（真超时：到期强制 kill，防止 networksetup 等命令无限挂起）
 enum Shell {
@@ -71,6 +72,7 @@ enum HotspotJoiner {
 
     /// 硬件端口列表解析（兼容中英文系统输出），失败时回退 en0 并用 ipconfig 验证
     static func wifiInterface() async throws -> String {
+        if let name = CWWiFiClient.shared().interface()?.interfaceName { return name }
         if let output = try? await Shell.run("/usr/sbin/networksetup", ["-listallhardwareports"]) {
             var lines = output.components(separatedBy: .newlines)
             let portHeader: (String) -> Bool = { line in
@@ -100,12 +102,13 @@ enum HotspotJoiner {
 
     /// SSID 读取：networksetup（双语）→ ipconfig（与语言无关）；新版 macOS 已移除 airport 工具
     static func currentSSID() async -> String? {
+        if let ssid = WiFiOutput.visibleSSID(CWWiFiClient.shared().interface()?.ssid()) { return ssid }
         if let port = try? await wifiInterface(),
            let output = try? await Shell.run("/usr/sbin/networksetup", ["-getairportnetwork", port]) {
             for prefix in ["Current Wi-Fi Network: ", "当前 Wi-Fi 网络：", "当前 Wi-Fi 网络: "] {
                 if let range = output.range(of: prefix) {
                     let ssid = String(output[range.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !ssid.isEmpty { return ssid }
+                    if let visible = WiFiOutput.visibleSSID(ssid) { return visible }
                 }
             }
         }
@@ -117,7 +120,7 @@ enum HotspotJoiner {
                 if trimmed.hasPrefix("SSID : ") {
                     let ssid = String(trimmed.dropFirst("SSID : ".count))
                         .trimmingCharacters(in: .whitespacesAndNewlines)
-                    if !ssid.isEmpty { return ssid }
+                    if let visible = WiFiOutput.visibleSSID(ssid) { return visible }
                 }
             }
         }
@@ -137,20 +140,19 @@ enum HotspotJoiner {
             pw = await keychainWifiPassword(ssid: ssid) ?? ""
         }
 
-        if !pw.isEmpty {
-            try await Shell.run("/usr/sbin/networksetup", ["-setairportnetwork", port, ssid, pw], timeout: 30)
-        } else {
-            // 无密码：若系统在关联中，杀太早会打断自动加入 → 给 20 秒；
-            // 若真在等 GUI 密码框则被超时杀掉，交由连通性轮询裁决
-            try? await Shell.run("/usr/sbin/networksetup", ["-setairportnetwork", port, ssid], timeout: 20)
+        let arguments = ["-setairportnetwork", port, ssid] + (pw.isEmpty ? [] : [pw])
+        let output = try await Shell.run("/usr/sbin/networksetup", arguments, timeout: 30)
+        if let failure = WiFiOutput.joinFailure(output) {
+            let safeFailure = pw.isEmpty ? failure : failure.replacingOccurrences(of: pw, with: "[密码已隐藏]")
+            throw WiFiAccessError.configuration("加入 Wi-Fi 失败：\(safeFailure)。请确认手机热点密码已保存（此密码与 BLE 配对密钥不同）。")
         }
     }
 
     /// 从钥匙串查询 Wi-Fi 密码（security CLI 可能弹授权框或挂起 → 5 秒硬超时）
     private static func keychainWifiPassword(ssid: String) async -> String? {
+        if let password = AppConfig.savedWiFiPassword(ssid: ssid), !password.isEmpty { return password }
         let argsList: [[String]] = [
             ["find-generic-password", "-D", "AirPort Network Password", "-a", ssid, "-w"],
-            ["find-generic-password", "-a", ssid, "-w"],
         ]
         for args in argsList {
             if let output = try? await Shell.run("/usr/bin/security", args, timeout: 5),
@@ -226,7 +228,7 @@ enum ConnectivityCheck {
             try await Task.sleep(nanoseconds: 1_000_000_000)
         }
         throw BleError.timeout(
-            "Wi-Fi 加入/连通性验证超时（\(Int(timeout))s）。当前 SSID=\(lastSSID ?? "未知")，网关=\(lastGateway ?? "无")"
+            "Wi-Fi 加入/连通性验证超时（\(Int(timeout))s）。当前 SSID=\(lastSSID ?? "不可读取，请检查应用位置权限")，网关=\(lastGateway ?? "无")。请检查热点 Wi-Fi 密码，或先在系统 Wi-Fi 菜单手动连接热点后重试。"
         )
     }
 }
