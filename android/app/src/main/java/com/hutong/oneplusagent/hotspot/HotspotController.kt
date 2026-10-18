@@ -10,9 +10,9 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
 /**
- * 热点控制策略链（无 Root 优先），详见 docs/hotspot-strategies.md：
- *   1. 反射 ConnectivityManager.startTethering(TETHERING_WIFI)
- *   2. Root 通道（当前设备未 Root，预留）
+ * 热点控制策略链，详见 docs/hotspot-strategies.md：
+ *   1. 反射 TetheringManager.startTethering（无 Root，本机被 entitlement 拦截，快速失败）
+ *   2. Root（su + app_process，Magisk 后可用，本机主路径）
  *   3. 拉起系统热点设置页（需手动一次点击）
  */
 class HotspotController(private val context: Context) {
@@ -27,10 +27,16 @@ class HotspotController(private val context: Context) {
     companion object {
         private const val TAG = "OnePlusAgent"
         private const val TETHERING_WIFI = 0
-        private const val AP_STATE_ACTION = "android.net.wifi.WIFI_AP_STATE_CHANGED"
     }
 
+    /** 服务端拒绝标志（error=14 entitlement 等），由 TetheringManager 回调置位 */
+    @Volatile
+    private var serverRejectedTethering = false
+    @Volatile
+    private var lastTetheringError = -1
+
     private val executor = Executors.newSingleThreadExecutor()
+    private val rootHotspot by lazy { RootHotspot(context) }
 
     /** 异步入口，回调在调用线程不保证；UI 侧自行 post */
     fun enable(onResult: (Result) -> Unit) {
@@ -52,26 +58,34 @@ class HotspotController(private val context: Context) {
             return Result.Success
         }
 
+        serverRejectedTethering = false
         if (tryStartTethering()) {
             if (waitForApState(on = true)) {
                 logChain("策略1 startTethering 成功")
                 return Result.Success
             }
-            logChain("策略1 已调用但热点未就绪")
+            logChain(
+                if (serverRejectedTethering) "策略1 被服务端拒绝(error=$lastTetheringError)"
+                else "策略1 已调用但热点未就绪"
+            )
         } else {
             logChain("策略1 startTethering 反射调用失败")
         }
 
-        if (tryRootEnable()) {
-            if (waitForApState(on = true)) {
-                logChain("策略2 Root 通道成功")
+        if (rootHotspot.available()) {
+            logChain("策略2 尝试 Root（su + app_process）…")
+            if (rootHotspot.enableBlocking()) {
+                logChain("策略2 Root 成功")
                 return Result.Success
             }
+            logChain("策略2 Root 执行失败")
+        } else {
+            logChain("策略2 Root 不可用（未装 Magisk 或未授权 su）")
         }
 
         // 策略3：兜底拉起设置页
         openTetherSettings()
-        return Result.NeedManual("反射与 Root 均不可用，已打开热点设置页，请手动开启")
+        return Result.NeedManual("自动开启不可用，已打开热点设置页，请手动开启")
     }
 
     fun disableBlocking(): Result {
@@ -80,10 +94,12 @@ class HotspotController(private val context: Context) {
             logChain("热点已关闭，跳过")
             return Result.Success
         }
-        if (tryStopTethering()) {
-            if (waitForApState(on = false)) return Result.Success
+        if (tryStopTethering() && waitForApState(on = false)) {
+            return Result.Success
         }
-        tryRootDisable()
+        if (rootHotspot.available() && rootHotspot.disableBlocking()) {
+            return Result.Success
+        }
         if (!isHotspotOn()) return Result.Success
         openTetherSettings()
         return Result.NeedManual("无法自动关闭，已打开热点设置页")
@@ -157,7 +173,12 @@ class HotspotController(private val context: Context) {
             ) { _, m, args ->
                 when (m.name) {
                     "onTetheringStarted" -> Log.i(TAG, "TetheringManager: onTetheringStarted")
-                    "onTetheringFailed" -> Log.w(TAG, "TetheringManager: onTetheringFailed error=${args?.firstOrNull()}")
+                    "onTetheringFailed" -> {
+                        val err = (args?.firstOrNull() as? Int) ?: -1
+                        serverRejectedTethering = true
+                        lastTetheringError = err
+                        Log.w(TAG, "TetheringManager: onTetheringFailed error=$err")
+                    }
                 }
                 null
             }
@@ -242,37 +263,6 @@ class HotspotController(private val context: Context) {
         false
     }
 
-    // ---------- 策略 2：Root（预留） ----------
-
-    private fun hasSu(): Boolean = try {
-        ProcessBuilder("which", "su").start().inputStream.readBytes().isNotEmpty()
-    } catch (t: Throwable) {
-        false
-    }
-
-    private fun tryRootEnable(): Boolean {
-        if (!hasSu()) return false
-        // 不同 ROM 命令有差异，Android 11 常见为 cmd wifi start-softap
-        val cmds = listOf("cmd wifi start-softap ap0", "svc wifi enable && cmd wifi start-softap ap0")
-        for (cmd in cmds) {
-            if (runSu(cmd)) return true
-        }
-        return false
-    }
-
-    private fun tryRootDisable(): Boolean {
-        if (!hasSu()) return false
-        return runSu("cmd wifi stop-softap")
-    }
-
-    private fun runSu(cmd: String): Boolean = try {
-        val p = ProcessBuilder("su", "-c", cmd).start()
-        p.waitFor() == 0
-    } catch (t: Throwable) {
-        Log.w(TAG, "su 执行失败 [$cmd]: $t")
-        false
-    }
-
     // ---------- 策略 3：设置页兜底 ----------
 
     private fun openTetherSettings() {
@@ -292,6 +282,8 @@ class HotspotController(private val context: Context) {
         val deadline = System.currentTimeMillis() + AgentConfig.HOTSPOT_POLL_TIMEOUT_MS
         while (System.currentTimeMillis() < deadline) {
             if (isHotspotOn() == on) return true
+            // 服务端已明确拒绝（如 entitlement error=14），无需继续等待
+            if (serverRejectedTethering) return false
             TimeUnit.MILLISECONDS.sleep(AgentConfig.HOTSPOT_POLL_INTERVAL_MS)
         }
         return isHotspotOn() == on
