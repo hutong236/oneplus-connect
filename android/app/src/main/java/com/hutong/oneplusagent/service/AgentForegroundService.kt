@@ -66,11 +66,6 @@ class AgentForegroundService : Service(), BleServer.Listener {
         // 调试入口：adb 可直接注入指令，与 BLE 路径走同一分发逻辑
         // 例：adb shell am start-foreground-service \
         //     -n com.hutong.oneplusagent/.service.AgentForegroundService --ei cmd 16
-        val debugCmd = intent?.getIntExtra("cmd", -1) ?: -1
-        if (debugCmd != -1) {
-            Log.i(TAG, "收到 adb 调试指令 cmd=0x%02x".format(debugCmd))
-            handleCommand(debugCmd)
-        }
         return START_STICKY
     }
 
@@ -135,7 +130,8 @@ class AgentForegroundService : Service(), BleServer.Listener {
     private fun upstreamOk(): Boolean = try {
         val cm = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
         val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
-        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+        caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VALIDATED)
     } catch (t: Throwable) {
         false
     }

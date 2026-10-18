@@ -7,6 +7,7 @@ macos/.build/
 macos/.swiftpm/
 macos/*.xcodeproj/
 DerivedData/
+dist/
 
 # Android / Gradle
 android/.gradle/

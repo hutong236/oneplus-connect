@@ -35,6 +35,7 @@ android {
     }
 }
 
-// 有意保持零第三方依赖：不引入 AndroidX，降低构建环境要求
+// 运行时不依赖第三方库；JUnit 仅用于本地单元测试。
 dependencies {
+    testImplementation("junit:junit:4.13.2")
 }

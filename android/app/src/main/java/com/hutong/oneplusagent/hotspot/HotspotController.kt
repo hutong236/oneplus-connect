@@ -74,7 +74,7 @@ class HotspotController(private val context: Context) {
 
         if (rootHotspot.available()) {
             logChain("策略2 尝试 Root（su + app_process）…")
-            if (rootHotspot.enableBlocking()) {
+            if (rootHotspot.enableBlocking() && waitForApState(on = true)) {
                 logChain("策略2 Root 成功")
                 return Result.Success
             }

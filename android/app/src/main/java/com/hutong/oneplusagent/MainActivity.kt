@@ -9,6 +9,7 @@ import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import android.widget.Button
+import android.widget.EditText
 import android.widget.TextView
 import com.hutong.oneplusagent.hotspot.HotspotController
 import com.hutong.oneplusagent.service.AgentForegroundService
@@ -31,6 +32,13 @@ class MainActivity : Activity() {
         logView = findViewById(R.id.log)
         statusView = findViewById(R.id.status)
 
+        val pairingSecret = findViewById<EditText>(R.id.pairingSecret)
+        findViewById<Button>(R.id.btnSavePairingSecret).setOnClickListener {
+            val saved = com.hutong.oneplusagent.core.BleSecretStore.provision(this, pairingSecret.text.toString())
+            pairingSecret.text.clear()
+            appendLog(if (saved) "BLE 配对密钥已加密保存" else "密钥至少需要 32 字节，或 Keystore 保存失败")
+        }
+
         findViewById<Button>(R.id.btnStartService).setOnClickListener { startAgent() }
         findViewById<Button>(R.id.btnStopService).setOnClickListener {
             stopService(Intent(this, AgentForegroundService::class.java))
@@ -50,24 +58,6 @@ class MainActivity : Activity() {
 
         requestRuntimePermissions()
         refreshStatus()
-        handleDebugIntent(intent)
-    }
-
-    override fun onNewIntent(intent: Intent?) {
-        super.onNewIntent(intent)
-        handleDebugIntent(intent)
-    }
-
-    /** 调试入口：adb shell am start -n .MainActivity --ei cmd 16（Activity 前台路径，绕过后台冻结） */
-    private fun handleDebugIntent(intent: Intent?) {
-        val cmd = intent?.getIntExtra("cmd", -1) ?: -1
-        if (cmd == -1) return
-        android.util.Log.i("OnePlusAgent", "Activity 收到调试指令 cmd=0x%02x".format(cmd))
-        appendLog("调试指令 0x%02x".format(cmd))
-        startForegroundService(
-            Intent(this, com.hutong.oneplusagent.service.AgentForegroundService::class.java)
-                .putExtra("cmd", cmd)
-        )
     }
 
     override fun onResume() {

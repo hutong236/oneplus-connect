@@ -27,11 +27,10 @@ my-Android-wlan/
 依赖：Xcode 26+（Swift 5.10+）
 
 ```bash
-cd macos
-swift build && swift run
+bash script/build_and_run.sh
 ```
 
-首次使用前编辑 `macos/Sources/OnePlusConnect/Config.swift`，填入 Wi-Fi 密码与配对密钥（需与 Android 端一致）。
+首次使用前按 [真机验收清单](docs/real-device-acceptance.md) 配置 BLE 配对密钥：Android 应用通过 Android Keystore 加密保存，macOS 从 Keychain 读取。不要把密钥写入源码或提交到 Git。
 
 ### Android 端（OnePlus Agent）
 

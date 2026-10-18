@@ -10,6 +10,11 @@ let package = Package(
         .executableTarget(
             name: "OnePlusConnect",
             path: "Sources/OnePlusConnect"
+        ),
+        .testTarget(
+            name: "OnePlusConnectTests",
+            dependencies: ["OnePlusConnect"],
+            path: "Tests/OnePlusConnectTests"
         )
     ]
 )

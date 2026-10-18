@@ -1,4 +1,4 @@
-# BLE 通信协议（v1）
+# BLE 通信协议（v2）
 
 两端（macOS / Android）共同遵守的 GATT 契约。**修改本文件必须同步两端 `Protocol.swift` / `BleProtocol.kt`。**
 
@@ -14,21 +14,23 @@
 
 广播：AD 数据携带 Service UUID（128-bit），便于 Mac 定向扫描；本地名 `OnePlus Agent`。
 
-## 鉴权（v1：共享密钥）
+## 配对与鉴权
 
-两端配置相同的 `sharedSecret`（UTF-8 字符串）。每条 CMD 帧携带 4 字节随机 nonce，
-`auth = SHA256(secretBytes ‖ nonce_le ‖ cmd)[0..7]`（前 8 字节）。手机端校验失败则忽略该帧并置错误位。
+首次写 CMD 时，GATT 要求系统加密并进行 MITM 保护的 Bond。Android 仅接受已 Bond 的客户端。
+应用层 HMAC 密钥由用户在两端安全配置：Android 使用 Gradle 本机属性注入后加密保存至 Android Keystore；
+macOS 从 Keychain 读取。密钥至少 32 个 UTF-8 字节，不能提交到仓库。
 
-> v1 为静态共享密钥，防的是陌生设备误触；后续可升级 challenge-response。
+每条 CMD 使用 `HMAC-SHA256(key, nonce_le ‖ cmd)[0..15]`。Nonce 由 Unix 毫秒时间戳和 16 位随机数组成；
+Android 按 Bond 设备持久保存最近接受的时间戳，拒绝重复、过期（5 分钟）和过度超前（30 秒）的帧。
 
-## CMD 帧（写入 CMD 特征，固定 14 字节）
+## CMD 帧（写入 CMD 特征，固定 26 字节）
 
 ```
 偏移  长度  字段
-0     1    version = 0x01
+0     1    version = 0x02
 1     1    cmd
-2     4    nonce（小端 uint32）
-6     8    auth（见上）
+2     8    nonce（小端 uint64）
+10    16   HMAC（见上，截断到 16 字节）
 ```
 
 | cmd 值 | 名称 | 含义 |
@@ -42,7 +44,7 @@
 
 ```
 偏移  长度  字段
-0     1    version = 0x01
+0     1    version = 0x02
 1     1    flags
 2     1    batteryPercent（0–100，未知=0xFF）
 3     1    ssidLen N（0 表示不携带）
@@ -73,5 +75,6 @@ Mac                                OnePlus 6T
 
 ## 错误与超时建议
 
+- Mac 写 CMD 前系统必须完成 Bond；密钥未配置时拒绝发送。
 - Mac 写 CMD 后 15s 内未收到 `HOTSPOT_ON` 视为失败，提示用户查看手机。
 - 手机端执行 CONNECT 若所有策略失败，置 `CMD_FAILED` 并回 STATUS。
