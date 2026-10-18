@@ -55,6 +55,14 @@ enum Shell {
 /// Wi-Fi 接入：networksetup 优先（密码可来自钥匙串），解析兼容中英文系统
 enum HotspotJoiner {
 
+    static func leaveHotspot() async throws {
+        guard await currentSSID() == AppConfig.hotspotSSID else { return }
+        guard let interface = CWWiFiClient.shared().interface() else {
+            throw BleError.connectFailed("未找到 Wi-Fi 硬件端口，无法退出手机热点")
+        }
+        interface.disassociate()
+    }
+
     /// 硬件端口列表解析（兼容中英文系统输出），失败时回退 en0 并用 ipconfig 验证
     static func wifiInterface() async throws -> String {
         if let name = CWWiFiClient.shared().interface()?.interfaceName { return name }
@@ -126,21 +134,33 @@ enum HotspotJoiner {
         }
 
         let arguments = ["-setairportnetwork", port, ssid] + (pw.isEmpty ? [] : [pw])
-        let output = try await Shell.run("/usr/sbin/networksetup", arguments, timeout: 30)
+        let output = try await WiFiJoinRetry.run(attempt: {
+            try await Shell.run("/usr/sbin/networksetup", arguments, timeout: 30)
+        })
+        if WiFiOutput.networkNotFound(output) {
+            throw WiFiAccessError.configuration("暂未发现 Wi-Fi「\(ssid)」，等待广播并尝试 4 次后仍不可见。请确认该网络开启、位于覆盖范围内，且网络名称正确，然后重试。")
+        }
         if let failure = WiFiOutput.joinFailure(output) {
             let safeFailure = pw.isEmpty ? failure : failure.replacingOccurrences(of: pw, with: "[密码已隐藏]")
-            throw WiFiAccessError.configuration("加入 Wi-Fi 失败：\(safeFailure)。请确认手机热点密码已保存（此密码与 BLE 配对密钥不同）。")
+            let hint = ssid == AppConfig.hotspotSSID
+                ? "请确认手机热点密码已保存（此密码与 BLE 配对密钥不同）。"
+                : "请在系统 Wi-Fi 菜单中连接「\(ssid)」，并检查此网络的密码。"
+            throw WiFiAccessError.configuration("加入 Wi-Fi「\(ssid)」失败：\(safeFailure)。\(hint)")
         }
     }
 
     /// 从钥匙串查询 Wi-Fi 密码（security CLI 可能弹授权框或挂起 → 5 秒硬超时）
-    private static func keychainWifiPassword(ssid: String) async -> String? {
-        if let password = AppConfig.savedWiFiPassword(ssid: ssid), !password.isEmpty { return password }
+    static func keychainWifiPassword(
+        ssid: String,
+        appPassword: (String) -> String? = AppConfig.savedWiFiPassword,
+        query: ([String]) async throws -> String = { try await Shell.run("/usr/bin/security", $0, timeout: 5) }
+    ) async -> String? {
+        if let password = appPassword(ssid), !password.isEmpty { return password }
         let argsList: [[String]] = [
-            ["find-generic-password", "-D", "AirPort Network Password", "-a", ssid, "-w"],
+            ["find-generic-password", "-D", "AirPort network password", "-a", ssid, "-w"],
         ]
         for args in argsList {
-            if let output = try? await Shell.run("/usr/bin/security", args, timeout: 5),
+            if let output = try? await query(args),
                !output.isEmpty,
                !output.contains("could not be found") {
                 let pw = output.trimmingCharacters(in: .whitespacesAndNewlines)

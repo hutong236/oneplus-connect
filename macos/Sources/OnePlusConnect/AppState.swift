@@ -12,12 +12,14 @@ final class AppState: ObservableObject {
         case hotspotStarting
         case joiningWifi
         case verifying
+        case leavingWifi
+        case disconnected(warning: String)
         case connected(gateway: String, internetReachable: Bool)
         case failed(String)
 
         var isRunning: Bool {
             switch self {
-            case .requestingWiFiAccess, .bleSearching, .hotspotStarting, .joiningWifi, .verifying: return true
+            case .requestingWiFiAccess, .bleSearching, .hotspotStarting, .joiningWifi, .verifying, .leavingWifi: return true
             default: return false
             }
         }
@@ -30,6 +32,8 @@ final class AppState: ObservableObject {
             case .hotspotStarting: return "BLE 已连接，正在开启手机热点 …"
             case .joiningWifi: return "热点已开启，正在加入 Wi-Fi …"
             case .verifying: return "验证网络连通性 …"
+            case .leavingWifi: return "正在退出手机热点 Wi-Fi …"
+            case .disconnected(let warning): return "已断开；\(warning)"
             case .connected(let gateway, let internet):
                 return internet ? "热点已连接（网关 \(gateway)，互联网可达）" : "热点已连接（网关 \(gateway)，互联网不可直连）"
             case .failed(let reason): return "失败：\(reason)"
@@ -42,15 +46,21 @@ final class AppState: ObservableObject {
     @Published private(set) var hotspotOn = false
     @Published var log: [String] = []
 
-    private let ble = BleCentral()
+    private let ble: any BleConnection
+    private let defaults: UserDefaults
     private var logTimeFormatter = DateFormatter()
-    private var previousSSID: String?
+    private let wifi: WiFiSession
     private var reconnectTask: Task<Void, Never>?
     private var reconnectAttempts = 0
+    private var wantsConnection = true
 
-    init() {
+    init(ble: (any BleConnection)? = nil, defaults: UserDefaults = .standard,
+         wifi: WiFiSession? = nil) {
+        self.ble = ble ?? BleCentral()
+        self.defaults = defaults
+        self.wifi = wifi ?? WiFiSession()
         logTimeFormatter.dateFormat = "HH:mm:ss"
-        ble.onStatus = { [weak self] status in
+        self.ble.onStatus = { [weak self] status in
             Task { @MainActor in
                 guard let self else { return }
                 self.battery = status.batteryPercent
@@ -60,29 +70,42 @@ final class AppState: ObservableObject {
                 }
             }
         }
-        ble.onUnexpectedDisconnect = { [weak self] in
-            Task { @MainActor in self?.scheduleReconnect() }
+        self.ble.onUnexpectedDisconnect = { [weak self] in
+            self?.scheduleReconnect()
         }
-        UserDefaults.standard.register(defaults: ["autoConnect": true, "autoReconnect": true])
+        defaults.register(defaults: ["autoConnect": true, "autoReconnect": true])
         Task { [weak self] in
-            guard UserDefaults.standard.bool(forKey: "autoConnect") else { return }
+            guard defaults.bool(forKey: "autoConnect") else { return }
             self?.connect()
         }
     }
 
     func connect() {
         guard !phase.isRunning else { return }
+        wantsConnection = true
+        phase = .requestingWiFiAccess
         reconnectTask?.cancel()
         reconnectTask = nil
         Task { await runConnectChain() }
     }
 
-    func disconnect() {
+    func setAutoReconnect(_ enabled: Bool) {
+        defaults.set(enabled, forKey: "autoReconnect")
+        if !enabled {
+            reconnectTask?.cancel()
+            reconnectTask = nil
+            reconnectAttempts = 0
+        }
+    }
+
+    func disconnect(closeHotspot: Bool = true) {
         guard !phase.isRunning else { return }
+        wantsConnection = false
+        phase = .bleSearching
         reconnectTask?.cancel()
         reconnectTask = nil
         reconnectAttempts = 0
-        Task { await runDisconnectChain() }
+        Task { await runDisconnectChain(closeHotspot: closeHotspot) }
     }
 
     private func runConnectChain() async {
@@ -96,12 +119,8 @@ final class AppState: ObservableObject {
             try await WiFiLocationAccess.shared.ensureAuthorized()
             phase = .bleSearching
             note("搜索 OnePlus Agent 广播 …")
-            try await ble.ensurePoweredOn()
+            try await ble.ensurePoweredOn(timeout: 5)
             try await ble.connect(timeout: AppConfig.scanTimeout)
-            if previousSSID == nil {
-                let currentSSID = await HotspotJoiner.currentSSID()
-                if currentSSID != AppConfig.hotspotSSID { previousSSID = currentSSID }
-            }
             note("BLE 已连接，发送 CONNECT 指令")
 
             phase = .hotspotStarting
@@ -130,22 +149,27 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func runDisconnectChain() async {
+    private func runDisconnectChain(closeHotspot: Bool) async {
         do {
-            phase = .bleSearching
-            try await ble.ensurePoweredOn()
-            try await ble.connect(timeout: AppConfig.scanTimeout)
-            _ = try await ble.send(BleProtocol.cmdDisconnect,
-                                   expectingHotspotOn: false,
-                                   timeout: AppConfig.hotspotTimeout)
+            if closeHotspot {
+                try await ble.ensurePoweredOn(timeout: 5)
+                try await ble.connect(timeout: AppConfig.scanTimeout)
+                let status = try await ble.send(BleProtocol.cmdDisconnect,
+                                                expectingHotspotOn: false,
+                                                timeout: AppConfig.hotspotTimeout)
+                hotspotOn = status.hotspotOn
+                battery = status.batteryPercent
+            }
             ble.disconnect()
-            phase = .idle
-            if let ssid = previousSSID {
-                try await HotspotJoiner.join(ssid: ssid, password: "")
-                previousSSID = nil
-                note("手机热点已关闭，正在恢复之前的 Wi-Fi：\(ssid)")
-            } else {
-                note("手机热点已关闭；没有检测到此前的 Wi-Fi 网络")
+            let result = closeHotspot ? "手机热点已关闭" : "已断开 Mac 连接，保留手机热点"
+            phase = .leavingWifi
+            do {
+                try await wifi.disconnect()
+                note("\(result)；后续 Wi-Fi 连接交由 macOS 管理")
+                phase = .idle
+            } catch {
+                phase = .disconnected(warning: "\(result)；退出手机热点 Wi-Fi 失败：\(error.localizedDescription)")
+                note("\(result)；退出手机热点 Wi-Fi 失败：\(error.localizedDescription)")
             }
         } catch {
             phase = .failed(error.localizedDescription)
@@ -160,7 +184,8 @@ final class AppState: ObservableObject {
     }
 
     private func scheduleReconnect() {
-        guard UserDefaults.standard.bool(forKey: "autoReconnect"),
+        guard defaults.bool(forKey: "autoReconnect"),
+              wantsConnection,
               reconnectTask == nil,
               !phase.isRunning,
               reconnectAttempts < 5 else { return }
@@ -170,7 +195,9 @@ final class AppState: ObservableObject {
         note("连接中断，\(delay) 秒后自动重连（\(reconnectAttempts)/5）")
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: delay * 1_000_000_000)
-            guard !Task.isCancelled, let self else { return }
+            guard !Task.isCancelled, let self,
+                  self.wantsConnection,
+                  self.defaults.bool(forKey: "autoReconnect") else { return }
             self.reconnectTask = nil
             self.connect()
         }

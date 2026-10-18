@@ -22,7 +22,18 @@ enum BleError: LocalizedError, Equatable {
 /// BLE 中心设备：扫描 → 连接 → 发现特征 → 订阅状态 → 写指令。
 /// 所有公开 async 方法串行使用（AppState 主线程调用）。
 @MainActor
-final class BleCentral: NSObject {
+protocol BleConnection: AnyObject {
+    var onStatus: ((BleProtocol.Status) -> Void)? { get set }
+    var onUnexpectedDisconnect: (() -> Void)? { get set }
+    func ensurePoweredOn(timeout: TimeInterval) async throws
+    func connect(timeout: TimeInterval) async throws
+    func send(_ cmd: UInt8, expectingHotspotOn expected: Bool?,
+              timeout: TimeInterval) async throws -> BleProtocol.Status
+    func disconnect()
+}
+
+@MainActor
+final class BleCentral: NSObject, BleConnection {
     enum Phase: Equatable {
         case idle, scanning, connecting, discovering, ready, disconnected
     }

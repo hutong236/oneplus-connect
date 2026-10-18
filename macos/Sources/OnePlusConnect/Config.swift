@@ -31,7 +31,7 @@ enum AppConfig {
     /// Wi-Fi 密码。强烈建议填写：
     /// - 填写后可用 networksetup 强制从其他 Wi-Fi 切换到热点（自动加入做不到跨网切换）
     /// - 留空则依赖「已知网络自动加入」（仅当 Mac 当前无 Wi-Fi 时有效）
-    /// 注：新版 macOS 的 Wi-Fi 密码不在登录钥匙串（security CLI 查不到），别指望它能取到
+    /// 系统密码读取可能需要钥匙串授权；应用专用条目优先。
     static let wifiPassword = ""
 
     static let scanTimeout: TimeInterval = 10

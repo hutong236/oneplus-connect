@@ -24,7 +24,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct MenuBarView: View {
     @EnvironmentObject private var state: AppState
 
-    // P1 再接入实际行为，当前仅持久化偏好
     @AppStorage("autoConnect") private var autoConnect = true
     @AppStorage("autoReconnect") private var autoReconnect = true
     @AppStorage("hotspotOffOnExit") private var hotspotOffOnExit = true
@@ -48,7 +47,8 @@ struct MenuBarView: View {
             Text(state.phase.label)
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
 
             HStack(spacing: 12) {
                 if let battery = state.battery {
@@ -75,12 +75,15 @@ struct MenuBarView: View {
 
             Toggle("自动连接", isOn: $autoConnect)
             Toggle("断线自动重连", isOn: $autoReconnect)
+                .onChange(of: autoReconnect) { _, enabled in
+                    state.setAutoReconnect(enabled)
+                }
             Toggle("断开时关闭热点", isOn: $hotspotOffOnExit)
 
             Divider()
 
-            Button("断开并关闭热点") {
-                state.disconnect()
+            Button(hotspotOffOnExit ? "断开并关闭热点" : "断开（保留手机热点）") {
+                state.disconnect(closeHotspot: hotspotOffOnExit)
             }
             .disabled(state.phase.isRunning || state.phase == .idle)
 
@@ -91,8 +94,9 @@ struct MenuBarView: View {
                         .font(.system(size: 10, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .textSelection(.enabled)
                 }
-                .frame(maxHeight: 72)
+                .frame(height: 90)
             }
 
             Divider()
