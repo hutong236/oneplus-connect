@@ -21,6 +21,7 @@ enum BleError: LocalizedError, Equatable {
 
 /// BLE 中心设备：扫描 → 连接 → 发现特征 → 订阅状态 → 写指令。
 /// 所有公开 async 方法串行使用（AppState 主线程调用）。
+@MainActor
 final class BleCentral: NSObject {
     enum Phase: Equatable {
         case idle, scanning, connecting, discovering, ready, disconnected
@@ -30,7 +31,6 @@ final class BleCentral: NSObject {
     var onStatus: ((BleProtocol.Status) -> Void)?
     var onUnexpectedDisconnect: (() -> Void)?
 
-    private let queue = DispatchQueue(label: "com.hutong.oneplusconnect.ble")
     private var manager: CBCentralManager?
     private var peripheral: CBPeripheral?
     private var cmdCharacteristic: CBCharacteristic?
@@ -57,16 +57,15 @@ final class BleCentral: NSObject {
 
     private(set) var phase: Phase = .idle {
         didSet {
-            let p = phase
-            DispatchQueue.main.async { [onPhaseChange] in onPhaseChange?(p) }
+            onPhaseChange?(phase)
         }
     }
 
     func ensurePoweredOn(timeout: TimeInterval = 5) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            queue.async {
+            DispatchQueue.main.async {
                 if self.manager == nil {
-                    self.manager = CBCentralManager(delegate: self, queue: self.queue)
+                    self.manager = CBCentralManager(delegate: self, queue: .main)
                 }
                 if self.manager?.state == .poweredOn {
                     cont.resume()
@@ -77,7 +76,7 @@ final class BleCentral: NSObject {
                     return
                 }
                 self.bootContinuation = cont
-                self.queue.asyncAfter(deadline: .now() + timeout) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
                     if let c = self.bootContinuation {
                         self.bootContinuation = nil
                         c.resume(throwing: BleError.bluetoothUnavailable)
@@ -90,7 +89,7 @@ final class BleCentral: NSObject {
     /// 已就绪时直接返回，否则扫描并完成整套连接 + 特征发现 + 订阅
     func connect(timeout: TimeInterval) async throws {
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-            queue.async {
+            DispatchQueue.main.async {
                 if let p = self.peripheral, p.state == .connected,
                    self.cmdCharacteristic != nil, self.statusCharacteristic != nil {
                     self.phase = .ready
@@ -109,7 +108,7 @@ final class BleCentral: NSObject {
                 self.phase = .scanning
                 manager.scanForPeripherals(withServices: [BleProtocol.serviceUUID],
                                            options: [CBCentralManagerScanOptionAllowDuplicatesKey: false])
-                self.queue.asyncAfter(deadline: .now() + timeout) {
+                DispatchQueue.main.asyncAfter(deadline: .now() + timeout) {
                     if let c = self.connectContinuation {
                         self.connectContinuation = nil
                         self.manager?.stopScan()
@@ -130,7 +129,7 @@ final class BleCentral: NSObject {
             throw BleError.connectFailed("BLE 未就绪")
         }
         return try await withCheckedThrowingContinuation { cont in
-            queue.async {
+            DispatchQueue.main.async {
                 guard self.pendingCommand == nil else {
                     cont.resume(throwing: BleError.busy)
                     return
@@ -145,7 +144,7 @@ final class BleCentral: NSObject {
                 }
                 pending.workItem = item
                 self.pendingCommand = pending
-                self.queue.asyncAfter(deadline: .now() + timeout, execute: item)
+                DispatchQueue.main.asyncAfter(deadline: .now() + timeout, execute: item)
                 peripheral.writeValue(BleProtocol.encodeCommand(cmd, secret: AppConfig.sharedSecret),
                                       for: characteristic, type: .withResponse)
             }
@@ -153,7 +152,7 @@ final class BleCentral: NSObject {
     }
 
     func disconnect() {
-        queue.async {
+        DispatchQueue.main.async {
             self.suppressDisconnectCallback = true
             if let p = self.peripheral {
                 self.manager?.cancelPeripheralConnection(p)
@@ -176,7 +175,7 @@ final class BleCentral: NSObject {
     }
 }
 
-extension BleCentral: CBCentralManagerDelegate, CBPeripheralDelegate {
+extension BleCentral: @preconcurrency CBCentralManagerDelegate, @preconcurrency CBPeripheralDelegate {
 
     func centralManagerDidUpdateState(_ central: CBCentralManager) {
         if central.state == .poweredOn, let cont = bootContinuation {
@@ -229,7 +228,7 @@ extension BleCentral: CBCentralManagerDelegate, CBPeripheralDelegate {
         }
         failPendingCommand(BleError.connectFailed("连接中断"))
         if wasUnexpected {
-            DispatchQueue.main.async { [onUnexpectedDisconnect] in onUnexpectedDisconnect?() }
+            onUnexpectedDisconnect?()
         }
     }
 
@@ -291,8 +290,7 @@ extension BleCentral: CBCentralManagerDelegate, CBPeripheralDelegate {
               let data = characteristic.value,
               let status = BleProtocol.parseStatus(data) else { return }
 
-        let s = status
-        DispatchQueue.main.async { [onStatus] in onStatus?(s) }
+        onStatus?(status)
 
         if let pending = pendingCommand,
            pending.expectHotspotOn == nil || pending.expectHotspotOn == status.hotspotOn {

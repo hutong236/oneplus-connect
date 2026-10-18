@@ -7,9 +7,9 @@ import Foundation
 enum BleProtocol {
     static let version: UInt8 = 2
 
-    static let serviceUUID = CBUUID(string: "7b6e0001-2a4c-4e6d-9b8a-5f1e3d5c7a9b")
-    static let cmdUUID = CBUUID(string: "7b6e0002-2a4c-4e6d-9b8a-5f1e3d5c7a9b")
-    static let statusUUID = CBUUID(string: "7b6e0003-2a4c-4e6d-9b8a-5f1e3d5c7a9b")
+    @MainActor static let serviceUUID = CBUUID(string: "7b6e0001-2a4c-4e6d-9b8a-5f1e3d5c7a9b")
+    @MainActor static let cmdUUID = CBUUID(string: "7b6e0002-2a4c-4e6d-9b8a-5f1e3d5c7a9b")
+    @MainActor static let statusUUID = CBUUID(string: "7b6e0003-2a4c-4e6d-9b8a-5f1e3d5c7a9b")
 
     static let cmdPing: UInt8 = 0x01
     static let cmdConnect: UInt8 = 0x10
